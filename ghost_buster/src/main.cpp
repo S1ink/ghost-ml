@@ -5,6 +5,7 @@
 
 #include <pcl/point_cloud.h>
 #include <pcl/filters/shadowpoints.h>
+#include <pcl/features/normal_3d.h>
 
 #include <pcl_conversions/pcl_conversions.h>
 
@@ -13,7 +14,9 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 
 #include "util/pub_map.hpp"
+#include "util/cloud_ops.hpp"
 #include "util/ros_utils.hpp"
+#include "util/std_utils.hpp"
 
 
 #define NODE_TOPIC(x) "/ghost_buster" x
@@ -30,6 +33,7 @@ class MainNode : public rclcpp::Node, util::UsingRosAliases
 
     using PointXYZ = pcl::PointXYZ;
     using PointCloudXYZ = pcl::PointCloud<PointXYZ>;
+    using PointCloudNormal = pcl::PointCloud<pcl::Normal>;
 
 public:
     MainNode();
@@ -41,6 +45,9 @@ protected:
     util::GenericPubMap pub_map;
 
     RclSubPtr<PointCloudMsg> pc_sub;
+
+    pcl::NormalEstimation<PointXYZ, pcl::Normal> normal_est;
+    pcl::ShadowPoints<PointXYZ, pcl::Normal> shadow_point_filter;
 };
 
 
@@ -60,7 +67,27 @@ void MainNode::scanCallback(const PointCloudMsg::ConstSharedPtr& msg)
     PointCloudXYZ raw_cloud;
     pcl::fromROSMsg(*msg, raw_cloud);
 
-    
+    std::shared_ptr<PointCloudXYZ> raw_cloud_ptr =
+        util::wrapUnmanaged(raw_cloud);
+    this->normal_est.setInputCloud(raw_cloud_ptr);
+
+    PointCloudNormal normals;
+    this->normal_est.compute(normals);
+
+    std::shared_ptr<PointCloudNormal> normals_ptr =
+        util::wrapUnmanaged(normals);
+    this->shadow_point_filter.setInputCloud(raw_cloud_ptr);
+    this->shadow_point_filter.setNormals(normals_ptr);
+    this->shadow_point_filter.setKSearch(10);
+
+    pcl::Indices filtered_indices;
+    this->shadow_point_filter.filter(filtered_indices);
+
+    util::removeSelection(raw_cloud, filtered_indices);
+
+    PointCloudMsg out_msg;
+    pcl::toROSMsg(raw_cloud, out_msg);
+    this->pub_map.publish("filtered_cloud", out_msg);
 }
 
 

@@ -29,10 +29,10 @@ colcon build \
     --executor parallel \
     --event-handlers console_direct+ \
     --cmake-args \
-        -DCMAKE_CXX_FLAGS="-march=native" \
-        -DCMAKE_C_FLAGS="-march=native" \
         -Wno-dev \
         -DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=ON
+        # -DCMAKE_CXX_FLAGS="-march=native" \
+        # -DCMAKE_C_FLAGS="-march=native" \
 
 END_TIME=$(date +%s.%N)
 DELTA_TIME=$(echo "$END_TIME - $START_TIME" | bc)

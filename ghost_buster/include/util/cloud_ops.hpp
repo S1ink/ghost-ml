@@ -125,6 +125,8 @@ void voxelFilter(
 {
     ASSERT_POINT_HAS_XYZ(PointT)
 
+    using namespace pcl::internal;
+
     // const Eigen::Vector3f
     //     leaf_size_{ leaf_x, leaf_y, leaf_z };
     const Eigen::Array3f inverse_leaf_size_{
