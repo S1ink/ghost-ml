@@ -1,0 +1,12 @@
+{
+    "pragma:enable_preproc": true,
+    "pragma:import":
+    [
+        "../../launch_utils/config/actions/bag.json",
+        "../../launch_utils/config/actions/foxglove.json",
+        "../../launch_utils/config/actions/joy.json",
+        "../../launch_utils/config/actions/tf.json",
+        "actions/annotator.json",
+        "presets/annotation.json"
+    ]
+}

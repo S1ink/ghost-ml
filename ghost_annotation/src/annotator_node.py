@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# NOTE: use chmod +x to make this scipt executable, otherwise ROS
+# complains that it can't be found!
 """
 annotator_node.py
 
@@ -59,9 +61,9 @@ SESSION_ID = datetime.now(timezone.utc).strftime("session_%Y%m%d_%H%M%S")
 # ─────────────────────────────────────────────────────────────────────────
 GRID_ROWS = 14
 GRID_COLS = 360
-ELEVATION_MIN_DEG = -22.2    # confirmed sensor spec
-ELEVATION_MAX_DEG = 42.2     # confirmed sensor spec
-AZIMUTH_OFFSET_DEG = 0.0     # <-- adjust if your driver has a known azimuth zero-offset
+ELEVATION_MIN_DEG = -22.2
+ELEVATION_MAX_DEG = 42.2
+AZIMUTH_OFFSET_DEG = 0.0
 
 ELEVATION_MIN_RAD = math.radians(ELEVATION_MIN_DEG)
 ELEVATION_MAX_RAD = math.radians(ELEVATION_MAX_DEG)
@@ -180,19 +182,55 @@ def prompt_bag_path(default_path=None):
 
 
 class AnnotatorNode(Node):
-    def __init__(self, bag_path: str):
+    def __init__(self, bag_path: str = None):
         super().__init__("lidar_annotator")
-        self._bag_path = bag_path
+
+        # Declare parameters with defaults from module-level constants
+        self.declare_parameter('bag_path', bag_path or '')
+        self.declare_parameter('input_cloud_topic', INPUT_CLOUD_TOPIC)
+        self.declare_parameter('output_cloud_topic', OUTPUT_CLOUD_TOPIC)
+        self.declare_parameter('ledger_path', LEDGER_PATH)
+        self.declare_parameter('reviewed_scans_path', REVIEWED_SCANS_PATH)
+        self.declare_parameter('grid_rows', GRID_ROWS)
+        self.declare_parameter('grid_cols', GRID_COLS)
+        self.declare_parameter('elevation_min_deg', ELEVATION_MIN_DEG)
+        self.declare_parameter('elevation_max_deg', ELEVATION_MAX_DEG)
+        self.declare_parameter('azimuth_offset_deg', AZIMUTH_OFFSET_DEG)
+        self.declare_parameter('heuristic_threshold', HEURISTIC_THRESHOLD)
+
+        # Retrieve parameter values
+        self._bag_path = self.get_parameter('bag_path').get_parameter_value().string_value
+        if not self._bag_path:
+            self._bag_path = prompt_bag_path()
+            if not self._bag_path:
+                raise RuntimeError("No bag_path parameter provided and prompt returned empty.")
+
+        # Resolve paths/topics
+        self._input_cloud_topic = self.get_parameter('input_cloud_topic').get_parameter_value().string_value
+        self._output_cloud_topic = self.get_parameter('output_cloud_topic').get_parameter_value().string_value
+        self._ledger_path = self.get_parameter('ledger_path').get_parameter_value().string_value
+        self._reviewed_scans_path = self.get_parameter('reviewed_scans_path').get_parameter_value().string_value
+        
+        self._grid_rows = self.get_parameter('grid_rows').get_parameter_value().integer_value
+        self._grid_cols = self.get_parameter('grid_cols').get_parameter_value().integer_value
+        self._elevation_min_deg = self.get_parameter('elevation_min_deg').get_parameter_value().double_value
+        self._elevation_max_deg = self.get_parameter('elevation_max_deg').get_parameter_value().double_value
+        self._azimuth_offset_deg = self.get_parameter('azimuth_offset_deg').get_parameter_value().double_value
+        self._heuristic_threshold = self.get_parameter('heuristic_threshold').get_parameter_value().double_value
+
+        self._elevation_min_rad = math.radians(self._elevation_min_deg)
+        self._elevation_max_rad = math.radians(self._elevation_max_deg)
+        self._azimuth_offset_rad = math.radians(self._azimuth_offset_deg)
 
         # ---- ledger setup ----
-        self._ledger_file = open(LEDGER_PATH, "a", buffering=1)  # line-buffered
-        self._reviewed_file = open(REVIEWED_SCANS_PATH, "a", buffering=1)
+        self._ledger_file = open(self._ledger_path, "a", buffering=1)  # line-buffered
+        self._reviewed_file = open(self._reviewed_scans_path, "a", buffering=1)
         self._undo_stack = []  # list of dicts we can pop to undo
 
         # ---- bag setup ----
         self._frame_id = "lidar"  # fallback default
         self.get_logger().info(f"Indexing bag: {self._bag_path}")
-        self._init_bag_reader(self._bag_path, INPUT_CLOUD_TOPIC)
+        self._init_bag_reader(self._bag_path, self._input_cloud_topic)
         self.get_logger().info(
             f"Indexed {len(self._scan_timestamps)} scans from bag.")
 
@@ -218,7 +256,7 @@ class AnnotatorNode(Node):
             history=QoSHistoryPolicy.KEEP_LAST,
         )
         self._cloud_pub = self.create_publisher(
-            PointCloud2, OUTPUT_CLOUD_TOPIC, qos)
+            PointCloud2, self._output_cloud_topic, qos)
         self.create_subscription(Joy, "/joy", self._on_joy, qos)
 
         self.create_timer(1.0 / REPUBLISH_RATE_HZ,
@@ -323,18 +361,18 @@ class AnnotatorNode(Node):
         xyz = scan["xyz"]
 
         grid = compute_polar_grid(
-            xyz, GRID_ROWS, GRID_COLS, ELEVATION_MIN_RAD, ELEVATION_MAX_RAD,
-            azimuth_offset_rad=AZIMUTH_OFFSET_RAD,
+            xyz, self._grid_rows, self._grid_cols, self._elevation_min_rad, self._elevation_max_rad,
+            azimuth_offset_rad=self._azimuth_offset_rad,
         )
         range_img, point_idx_img = build_range_image(
             grid["row_idx"],
             grid["col_idx"],
             grid["ranges"],
             grid["orig_indices"],
-            GRID_ROWS, GRID_COLS,
+            self._grid_rows, self._grid_cols,
         )
         scores = heuristic_candidate_scores(range_img)
-        candidates = get_candidate_cells(scores, HEURISTIC_THRESHOLD)
+        candidates = get_candidate_cells(scores, self._heuristic_threshold)
 
         self._current_scan_state = {
             "stamp_ns": scan["stamp_ns"],
@@ -570,23 +608,16 @@ class AnnotatorNode(Node):
 
 
 def main():
-    bag_path = prompt_bag_path()
-    if not bag_path:
-        print("No bag file selected. Exiting.")
-        return
-
-    if not os.path.exists(bag_path):
-        print(f"Error: The selected path does not exist: {bag_path}")
-        return
-
     rclpy.init()
-    node = AnnotatorNode(bag_path)
+    node = None
     try:
+        node = AnnotatorNode()
         rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+    except (KeyboardInterrupt, RuntimeError, FileNotFoundError) as e:
+        print(f"Annotator exiting: {e}")
     finally:
-        node.destroy_node()
+        if node is not None:
+            node.destroy_node()
         rclpy.shutdown()
 
 

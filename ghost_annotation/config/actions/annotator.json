@@ -1,0 +1,26 @@
+{
+    "annotator":
+    {
+        "pragma:default": null,
+
+        "multiscan":
+        {
+            "pragma:node_options":
+            {
+                "emulate_tty": true
+            },
+
+            "bag_path": "",
+            "input_cloud_topic": "/multiscan/lidar_scan",
+            "output_cloud_topic": "/annotator/colorized_cloud",
+            "ledger_path": "labels_ledger.jsonl",
+            "reviewed_scans_path": "reviewed_scans.jsonl",
+            "grid_rows": 14,
+            "grid_cols": 360,
+            "elevation_min_deg": -22.2,
+            "elevation_max_deg": 42.2,
+            "azimuth_offset_deg": 0.0,
+            "heuristic_threshold": 1.0
+        }
+    }
+}

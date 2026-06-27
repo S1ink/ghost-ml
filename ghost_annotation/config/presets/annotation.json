@@ -1,0 +1,27 @@
+{
+    "annotation":
+    {
+        "pragma:default": null,
+
+        "lance1":
+        {
+            "pragma:action_overrides":
+            {
+                "joy_node": "enabled",
+                "foxglove_bridge": "all",
+                "robot_tf": "lance",
+                "annotator": "multiscan"
+            }
+        },
+        "lance2":
+        {
+            "pragma:action_overrides":
+            {
+                "joy_node": "enabled",
+                "foxglove_bridge": "all",
+                "robot_tf": "lance2",
+                "annotator": "multiscan"
+            }
+        }
+    }
+}
