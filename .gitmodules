@@ -1,0 +1,3 @@
+[submodule "launch_utils"]
+	path = launch_utils
+	url = https://github.com/Cardinal-Space-Mining/launch-utils

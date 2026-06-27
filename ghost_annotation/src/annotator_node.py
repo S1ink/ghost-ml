@@ -47,7 +47,6 @@ from grid_utils import (
 # ─────────────────────────────────────────────────────────────────────────
 # BAG / TOPIC CONFIG
 # ─────────────────────────────────────────────────────────────────────────
-BAG_PATH = "/path/to/your.mcap"                  # <-- FILL IN
 INPUT_CLOUD_TOPIC = "/multiscan/lidar_scan"       # <-- confirm matches your bag
 OUTPUT_CLOUD_TOPIC = "/annotator/colorized_cloud"  # what you point Foxglove at
 
@@ -60,8 +59,8 @@ SESSION_ID = datetime.now(timezone.utc).strftime("session_%Y%m%d_%H%M%S")
 # ─────────────────────────────────────────────────────────────────────────
 GRID_ROWS = 14
 GRID_COLS = 360
-ELEVATION_MIN_DEG = -32.5    # <-- CONFIRM: actual lower bound of your FOV
-ELEVATION_MAX_DEG = 32.5     # <-- CONFIRM: actual upper bound of your FOV
+ELEVATION_MIN_DEG = -22.2    # confirmed sensor spec
+ELEVATION_MAX_DEG = 42.2     # confirmed sensor spec
 AZIMUTH_OFFSET_DEG = 0.0     # <-- adjust if your driver has a known azimuth zero-offset
 
 ELEVATION_MIN_RAD = math.radians(ELEVATION_MIN_DEG)
@@ -91,7 +90,8 @@ BTN_B = 1       # finish scan now (mark reviewed, jump to next scan)
 BTN_X = 2       # undo last label
 BTN_Y = 3       # mark whole scan clean (deny-all remaining candidates quickly)
 BTN_RB = 5      # jump back one scan (for re-review)
-BTN_START = 7   # force-flush ledger to disk (auto-flushes after every write anyway)
+# force-flush ledger to disk (auto-flushes after every write anyway)
+BTN_START = 7
 
 # RT = confirm current candidate as artifact
 # LT = deny current candidate (hard negative)
@@ -115,9 +115,74 @@ def pack_rgb_float(r: int, g: int, b: int) -> float:
     return struct.unpack("f", struct.pack("I", packed))[0]
 
 
+def prompt_bag_path(default_path=None):
+    """
+    Prompts the user for a bag path using a GUI dialog (zenity or tkinter) if available.
+    Falls back to a CLI prompt if GUI tools are unavailable or fail.
+    """
+    import subprocess
+    import shutil
+    import os
+
+    # 1. Try zenity (common on Linux/GTK environments)
+    if shutil.which("zenity"):
+        try:
+            # We filter for .mcap files and metadata.yaml
+            # If the user selects metadata.yaml, we'll use its directory.
+            cmd = [
+                "zenity",
+                "--file-selection",
+                "--title=Select ROS2 Bag File or Directory",
+                "--file-filter=ROS2 Bags (*.mcap metadata.yaml) | *.mcap metadata.yaml",
+                "--file-filter=All Files | *"
+            ]
+            path = subprocess.check_output(cmd, text=True).strip()
+            if path:
+                if os.path.basename(path) == "metadata.yaml":
+                    path = os.path.dirname(path)
+                return path
+        except subprocess.CalledProcessError:
+            # Zenity failed or user cancelled
+            pass
+
+    # 2. Try tkinter as a fallback
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+        root = tk.Tk()
+        root.withdraw()
+        path = filedialog.askopenfilename(
+            title="Select ROS2 Bag File or Directory",
+            filetypes=[("ROS2 Bag", "*.mcap metadata.yaml"),
+                       ("All Files", "*.*")]
+        )
+        if path:
+            if os.path.basename(path) == "metadata.yaml":
+                path = os.path.dirname(path)
+            return path
+    except Exception:
+        pass
+
+    # 3. Fallback to command line prompt
+    print("\nCould not open file dialogue or dialogue cancelled.")
+    if default_path and os.path.exists(default_path):
+        prompt_str = f"Please enter the path to the ROS2 bag [default: {default_path}]: "
+    else:
+        prompt_str = "Please enter the path to the ROS2 bag: "
+
+    try:
+        user_input = input(prompt_str).strip()
+        if not user_input and default_path:
+            return default_path
+        return user_input
+    except (KeyboardInterrupt, EOFError):
+        return default_path
+
+
 class AnnotatorNode(Node):
-    def __init__(self):
+    def __init__(self, bag_path: str):
         super().__init__("lidar_annotator")
+        self._bag_path = bag_path
 
         # ---- ledger setup ----
         self._ledger_file = open(LEDGER_PATH, "a", buffering=1)  # line-buffered
@@ -125,14 +190,16 @@ class AnnotatorNode(Node):
         self._undo_stack = []  # list of dicts we can pop to undo
 
         # ---- bag setup ----
-        self.get_logger().info(f"Loading bag: {BAG_PATH}")
-        self._scans = self._load_bag_scans(BAG_PATH, INPUT_CLOUD_TOPIC)
-        self.get_logger().info(f"Loaded {len(self._scans)} scans from bag.")
-        if not self._scans:
-            raise RuntimeError(
-                f"No messages found on topic '{INPUT_CLOUD_TOPIC}' in bag "
-                f"'{BAG_PATH}'. Double check BAG_PATH / INPUT_CLOUD_TOPIC."
-            )
+        self._frame_id = "lidar"  # fallback default
+        self.get_logger().info(f"Indexing bag: {self._bag_path}")
+        self._init_bag_reader(self._bag_path, INPUT_CLOUD_TOPIC)
+        self.get_logger().info(
+            f"Indexed {len(self._scan_timestamps)} scans from bag.")
+
+        # ---- cache setup ----
+        self._scan_cache = {}
+        self._cache_order = []
+        self._cache_limit = 20
 
         # ---- per-scan working state ----
         self._scan_idx = 0
@@ -150,10 +217,12 @@ class AnnotatorNode(Node):
             durability=QoSDurabilityPolicy.VOLATILE,
             history=QoSHistoryPolicy.KEEP_LAST,
         )
-        self._cloud_pub = self.create_publisher(PointCloud2, OUTPUT_CLOUD_TOPIC, qos)
+        self._cloud_pub = self.create_publisher(
+            PointCloud2, OUTPUT_CLOUD_TOPIC, qos)
         self.create_subscription(Joy, "/joy", self._on_joy, qos)
 
-        self.create_timer(1.0 / REPUBLISH_RATE_HZ, self._republish_current_cloud)
+        self.create_timer(1.0 / REPUBLISH_RATE_HZ,
+                          self._republish_current_cloud)
 
         self.get_logger().info(
             "Ready. RT=confirm artifact, LT=deny, A=next candidate, "
@@ -161,23 +230,22 @@ class AnnotatorNode(Node):
         )
 
     # ─────────────────────────────────────────────────────────────────
-    # Bag loading
+    # Bag loading and caching
     # ─────────────────────────────────────────────────────────────────
-    def _load_bag_scans(self, bag_path: str, topic: str) -> list:
+    def _init_bag_reader(self, bag_path: str, topic: str):
         """
-        Reads every PointCloud2 message on `topic` into memory as raw XYZ
-        numpy arrays. Fine for low-res scans (~5k points each); if you
-        later annotate much larger bags, switch this to a streaming /
-        seek-based reader instead of loading everything up front.
+        Opens the bag and scans the timestamps for the selected topic
+        without deserializing the actual PointCloud2 payloads, keeping startup fast.
         """
-        storage_options = rosbag2_py.StorageOptions(uri=bag_path, storage_id="mcap")
+        storage_options = rosbag2_py.StorageOptions(
+            uri=bag_path, storage_id="mcap")
         converter_options = rosbag2_py.ConverterOptions(
             input_serialization_format="cdr", output_serialization_format="cdr"
         )
-        reader = rosbag2_py.SequentialReader()
-        reader.open(storage_options, converter_options)
+        self._reader = rosbag2_py.SequentialReader()
+        self._reader.open(storage_options, converter_options)
 
-        topic_types = reader.get_all_topics_and_types()
+        topic_types = self._reader.get_all_topics_and_types()
         type_map = {t.name: t.type for t in topic_types}
         if topic not in type_map:
             available = ", ".join(type_map.keys())
@@ -185,37 +253,73 @@ class AnnotatorNode(Node):
                 f"Topic '{topic}' not found in bag. Available topics: {available}"
             )
 
-        from rclpy.serialization import deserialize_message
         from rosidl_runtime_py.utilities import get_message
-
-        msg_type = get_message(type_map[topic])
+        self._msg_type = get_message(type_map[topic])
 
         storage_filter = rosbag2_py.StorageFilter(topics=[topic])
-        reader.set_filter(storage_filter)
+        self._reader.set_filter(storage_filter)
 
-        scans = []
-        while reader.has_next():
-            (read_topic, data, t) = reader.read_next()
-            msg = deserialize_message(data, msg_type)
+        self._scan_timestamps = []
+        while self._reader.has_next():
+            (read_topic, data, t) = self._reader.read_next()
+            self._scan_timestamps.append(t)
+
+    def _read_scan_from_bag(self, idx: int) -> dict:
+        """
+        Seeks to the timestamp of the requested scan and deserializes it on demand.
+        """
+        t = self._scan_timestamps[idx]
+        self._reader.seek(t)
+        if self._reader.has_next():
+            (read_topic, data, msg_t) = self._reader.read_next()
+            from rclpy.serialization import deserialize_message
+            msg = deserialize_message(data, self._msg_type)
+            if hasattr(msg.header, 'frame_id'):
+                self._frame_id = msg.header.frame_id
             xyz = self._extract_xyz(msg)
-            scans.append({"stamp_ns": t, "xyz": xyz})
-        return scans
+            return {"stamp_ns": msg_t, "xyz": xyz}
+        raise RuntimeError(f"Failed to read scan at index {idx} with stamp {t}")
+
+    def _get_scan(self, idx: int) -> dict:
+        """
+        Maintains a small cache of loaded scans to keep navigation snappy
+        without consuming excessive memory.
+        """
+        if idx in self._scan_cache:
+            # Move to end of cache_order (most recently used)
+            self._cache_order.remove(idx)
+            self._cache_order.append(idx)
+            return self._scan_cache[idx]
+
+        # Load from bag
+        scan = self._read_scan_from_bag(idx)
+
+        # Add to cache
+        self._scan_cache[idx] = scan
+        self._cache_order.append(idx)
+        if len(self._cache_order) > self._cache_limit:
+            oldest = self._cache_order.pop(0)
+            self._scan_cache.pop(oldest, None)
+
+        return scan
 
     @staticmethod
     def _extract_xyz(cloud_msg: PointCloud2) -> np.ndarray:
         """Pulls an (N, 3) float64 XYZ array out of a PointCloud2, robust to
         field order / extra fields (intensity, ring, etc. all ignored)."""
-        points = pc2.read_points(cloud_msg, field_names=("x", "y", "z"), skip_nans=True)
-        xyz = np.column_stack([points["x"], points["y"], points["z"]]).astype(np.float64)
+        points = pc2.read_points(
+            cloud_msg, field_names=("x", "y", "z"), skip_nans=True)
+        xyz = np.column_stack(
+            [points["x"], points["y"], points["z"]]).astype(np.float64)
         return xyz
 
     # ─────────────────────────────────────────────────────────────────
     # Per-scan setup
     # ─────────────────────────────────────────────────────────────────
     def _load_scan(self, idx: int):
-        idx = max(0, min(idx, len(self._scans) - 1))
+        idx = max(0, min(idx, len(self._scan_timestamps) - 1))
         self._scan_idx = idx
-        scan = self._scans[idx]
+        scan = self._get_scan(idx)
         xyz = scan["xyz"]
 
         grid = compute_polar_grid(
@@ -223,7 +327,10 @@ class AnnotatorNode(Node):
             azimuth_offset_rad=AZIMUTH_OFFSET_RAD,
         )
         range_img, point_idx_img = build_range_image(
-            grid["row_idx"], grid["col_idx"], grid["ranges"], grid["orig_indices"],
+            grid["row_idx"],
+            grid["col_idx"],
+            grid["ranges"],
+            grid["orig_indices"],
             GRID_ROWS, GRID_COLS,
         )
         scores = heuristic_candidate_scores(range_img)
@@ -235,13 +342,16 @@ class AnnotatorNode(Node):
             "range_img": range_img,
             "point_idx_img": point_idx_img,
             "scores": scores,
-            "candidates": candidates,          # list of (row, col), score-sorted
+            # list of (row, col), score-sorted
+            "candidates": candidates,
             "candidate_ptr": 0,
-            "decided": {},                      # (row,col) -> "artifact"/"clean"
-            "flash": None,                      # ((row,col), color, expiry_time) or None
+            # (row,col) -> "artifact"/"clean"
+            "decided": {},
+            # ((row,col), color, expiry_time) or None
+            "flash": None,
         }
         self.get_logger().info(
-            f"Scan {idx+1}/{len(self._scans)}  "
+            f"Scan {idx + 1}/{len(self._scan_timestamps)}  "
             f"({len(candidates)} candidates flagged)"
         )
 
@@ -262,8 +372,10 @@ class AnnotatorNode(Node):
                 and self._prev_buttons[idx] == 0
             )
 
-        lt_pressed_now = len(axes) > AXIS_LEFT_TRIGGER and axes[AXIS_LEFT_TRIGGER] < TRIGGER_PRESS_THRESHOLD
-        rt_pressed_now = len(axes) > AXIS_RIGHT_TRIGGER and axes[AXIS_RIGHT_TRIGGER] < TRIGGER_PRESS_THRESHOLD
+        lt_pressed_now = (len(axes) > AXIS_LEFT_TRIGGER and
+                          axes[AXIS_LEFT_TRIGGER] < TRIGGER_PRESS_THRESHOLD)
+        rt_pressed_now = (len(axes) > AXIS_RIGHT_TRIGGER and
+                          axes[AXIS_RIGHT_TRIGGER] < TRIGGER_PRESS_THRESHOLD)
         lt_edge = lt_pressed_now and not self._prev_lt_pressed
         rt_edge = rt_pressed_now and not self._prev_rt_pressed
         self._prev_lt_pressed = lt_pressed_now
@@ -303,7 +415,7 @@ class AnnotatorNode(Node):
         row, col = cell
 
         record = {
-            "bag": os.path.basename(BAG_PATH),
+            "bag": os.path.basename(self._bag_path),
             "scan_stamp_ns": st["stamp_ns"],
             "ring": int(row),
             "azimuth_idx": int(col),
@@ -317,10 +429,11 @@ class AnnotatorNode(Node):
 
         st["decided"][cell] = label
         st["flash"] = (cell, COLOR_CONFIRMED if label == "artifact" else COLOR_DENIED,
-                        time.time() + 0.25)
+                       time.time() + 0.25)
         self._undo_stack.append(record)
 
-        self.get_logger().info(f"  [{label}] ring={row} az_idx={col} range={record['range_m']:.2f}m")
+        self.get_logger().info(
+            f"  [{label}] ring={row} az_idx={col} range={record['range_m']:.2f}m")
         self._advance_candidate()
 
     def _advance_candidate(self):
@@ -343,7 +456,8 @@ class AnnotatorNode(Node):
                 st["candidate_ptr"] = idx
             except ValueError:
                 pass
-        self.get_logger().info(f"  [undo] {record['label']} ring={record['ring']} az_idx={record['azimuth_idx']}")
+        self.get_logger().info(
+            f"  [undo] {record['label']} ring={record['ring']} az_idx={record['azimuth_idx']}")
         # NOTE: this does not retract the line already written to the ledger
         # file. The build-script step (which turns the ledger into training
         # tensors) should take the LAST label for any duplicate (scan, ring,
@@ -357,7 +471,7 @@ class AnnotatorNode(Node):
             if cell in st["decided"]:
                 continue
             record = {
-                "bag": os.path.basename(BAG_PATH),
+                "bag": os.path.basename(self._bag_path),
                 "scan_stamp_ns": st["stamp_ns"],
                 "ring": int(row),
                 "azimuth_idx": int(col),
@@ -375,7 +489,7 @@ class AnnotatorNode(Node):
         st = self._current_scan_state
         n_confirmed = sum(1 for v in st["decided"].values() if v == "artifact")
         review_record = {
-            "bag": os.path.basename(BAG_PATH),
+            "bag": os.path.basename(self._bag_path),
             "scan_stamp_ns": st["stamp_ns"],
             "n_candidates": len(st["candidates"]),
             "n_confirmed": n_confirmed,
@@ -420,13 +534,20 @@ class AnnotatorNode(Node):
     def _build_xyzrgb_cloud(self, xyz: np.ndarray, rgb_packed: np.ndarray) -> PointCloud2:
         header_stamp = self.get_clock().now().to_msg()
         fields = [
-            PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-            PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-            PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-            PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1),
+            PointField(name="x", offset=0,
+                       datatype=PointField.FLOAT32, count=1),
+            PointField(name="y", offset=4,
+                       datatype=PointField.FLOAT32, count=1),
+            PointField(name="z", offset=8,
+                       datatype=PointField.FLOAT32, count=1),
+            PointField(name="rgb", offset=12,
+                       datatype=PointField.FLOAT32, count=1),
         ]
         cloud_data = np.zeros(xyz.shape[0], dtype=[
-            ("x", np.float32), ("y", np.float32), ("z", np.float32), ("rgb", np.float32)
+            ("x", np.float32),
+            ("y", np.float32),
+            ("z", np.float32),
+            ("rgb", np.float32)
         ])
         cloud_data["x"] = xyz[:, 0]
         cloud_data["y"] = xyz[:, 1]
@@ -436,19 +557,30 @@ class AnnotatorNode(Node):
         from std_msgs.msg import Header
         header = Header()
         header.stamp = header_stamp
-        header.frame_id = "lidar"  # <-- adjust to match your TF tree if needed
+        header.frame_id = self._frame_id
 
         return pc2.create_cloud(header, fields, cloud_data)
 
     def destroy_node(self):
         self._ledger_file.close()
         self._reviewed_file.close()
+        if hasattr(self, '_reader'):
+            self._reader.close()
         super().destroy_node()
 
 
 def main():
+    bag_path = prompt_bag_path()
+    if not bag_path:
+        print("No bag file selected. Exiting.")
+        return
+
+    if not os.path.exists(bag_path):
+        print(f"Error: The selected path does not exist: {bag_path}")
+        return
+
     rclpy.init()
-    node = AnnotatorNode()
+    node = AnnotatorNode(bag_path)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
