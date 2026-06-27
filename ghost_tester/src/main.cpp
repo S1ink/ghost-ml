@@ -27,7 +27,7 @@
     rclcpp::SensorDataQoS {}
 
 
-class MainNode : public rclcpp::Node, util::UsingRosAliases
+class TestNode : public rclcpp::Node, util::UsingRosAliases
 {
     using PointCloudMsg = sensor_msgs::msg::PointCloud2;
 
@@ -36,7 +36,7 @@ class MainNode : public rclcpp::Node, util::UsingRosAliases
     using PointCloudNormal = pcl::PointCloud<pcl::Normal>;
 
 public:
-    MainNode();
+    TestNode();
 
 public:
     void scanCallback(const PointCloudMsg::ConstSharedPtr&);
@@ -51,7 +51,7 @@ protected:
 };
 
 
-MainNode::MainNode() :
+TestNode::TestNode() :
     Node("ghost_buster_node"),
     pub_map{*this, NODE_TOPIC(), SENSOR_QOS},
     pc_sub{this->create_subscription<PointCloudMsg>(
@@ -60,9 +60,10 @@ MainNode::MainNode() :
         [this](const PointCloudMsg::ConstSharedPtr& msg)
         { this->scanCallback(msg); })}
 {
+    // this->shadow_point_filter.setThreshold();
 }
 
-void MainNode::scanCallback(const PointCloudMsg::ConstSharedPtr& msg)
+void TestNode::scanCallback(const PointCloudMsg::ConstSharedPtr& msg)
 {
     PointCloudXYZ raw_cloud;
     pcl::fromROSMsg(*msg, raw_cloud);
@@ -70,6 +71,7 @@ void MainNode::scanCallback(const PointCloudMsg::ConstSharedPtr& msg)
     std::shared_ptr<PointCloudXYZ> raw_cloud_ptr =
         util::wrapUnmanaged(raw_cloud);
     this->normal_est.setInputCloud(raw_cloud_ptr);
+    this->normal_est.setKSearch(10);
 
     PointCloudNormal normals;
     this->normal_est.compute(normals);
@@ -78,7 +80,6 @@ void MainNode::scanCallback(const PointCloudMsg::ConstSharedPtr& msg)
         util::wrapUnmanaged(normals);
     this->shadow_point_filter.setInputCloud(raw_cloud_ptr);
     this->shadow_point_filter.setNormals(normals_ptr);
-    this->shadow_point_filter.setKSearch(10);
 
     pcl::Indices filtered_indices;
     this->shadow_point_filter.filter(filtered_indices);
@@ -94,7 +95,7 @@ void MainNode::scanCallback(const PointCloudMsg::ConstSharedPtr& msg)
 int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<MainNode>());
+    rclcpp::spin(std::make_shared<TestNode>());
     rclcpp::shutdown();
 
     return 0;
