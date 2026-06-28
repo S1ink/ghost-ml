@@ -1,105 +1,151 @@
 """
-Quick synthetic sanity checks for grid_utils.py -- run with:
+Synthetic sanity checks for grid_utils.py v2 -- run with:
     python3 test_grid_utils.py
 No ROS dependencies needed.
+
+Covers the failure modes reported from real-data testing:
+  - far-range bouncing/noisy points (low angular resolution) -> must NOT
+    be flagged now that detection is range-gated
+  - near-range ghost/blur artifact -> must be flagged
+  - near-range pop-out (single point closer than everything around it)
+    -> must be flagged
+  - non-uniform layer spacing -> nearest-angle binning must still land
+    points in the correct row
 """
 
 import numpy as np
 from grid_utils import (
     compute_polar_grid,
     build_range_image,
-    heuristic_candidate_scores,
+    ghost_candidate_scores,
+    popout_candidate_scores,
     get_candidate_cells,
 )
 
-GRID_ROWS = 14
 GRID_COLS = 360
-ELEV_MIN = np.radians(-32.5)
-ELEV_MAX = np.radians(32.5)
+
+# Deliberately NON-uniform layer spacing, to test that nearest-angle
+# binning (not a uniform-bin formula) is actually being used.
+LAYER_ELEVATIONS_DEG = np.array([
+    42.2, 35.0, 29.0, 24.5, 19.0, 14.8, 10.0,
+    5.5, 1.0, -4.0, -9.5, -14.0, -18.5, -22.2,
+])
+LAYER_ELEVATIONS_RAD = np.radians(LAYER_ELEVATIONS_DEG)
+GRID_ROWS = len(LAYER_ELEVATIONS_DEG)
+
+MAX_CANDIDATE_RANGE_M = 3.0
 
 
 def make_synthetic_scan():
     """
-    Build a fake scan: 14 rings x 360 azimuth steps, all on a flat wall at
-    range 5.0m, EXCEPT a few cells injected with a "flying pixel" value
-    sitting between the wall (5.0m) and a doorway behind it (9.0m).
+    Builds a scan with several known regions:
+      - near wall at 2.0m, columns 0-179 (everything inside candidate range)
+      - far wall at 8.0m, columns 180-269 (outside candidate range -- should
+        never be flagged regardless of how noisy it is)
+      - far wall gets per-point quantization-style noise (+/- up to 0.4m,
+        unrealistically large on purpose) to simulate the "bounces a lot at
+        low angular resolution" complaint
+      - a near-range doorway edge at columns 90-95 (1.0m) with REAL ghost
+        artifacts injected at the boundary cells (range between 1.0 and 2.0)
+      - a near-range pop-out spike injected at column 40 (single point much
+        closer than its neighbors)
+      - some cells are dropped entirely (NaN) to simulate telemetry-
+        reduction gaps
     """
     rows, cols = GRID_ROWS, GRID_COLS
-    # Bin CENTERS, not edges -- placing synthetic points exactly on a bin
-    # boundary makes the test vulnerable to floating-point round-trip
-    # aliasing through atan2 (a point sitting exactly at a boundary can
-    # land in either neighboring bin depending on sub-ULP noise). Real
-    # lidar data essentially never sits exactly on a bin edge, so this is
-    # a test-generator concern, not a grid_utils bug -- but worth avoiding
-    # here to get a clean read on the heuristic itself.
     az_width = 2 * np.pi / cols
-    el_width = (ELEV_MAX - ELEV_MIN) / rows
     az = -np.pi + (np.arange(cols) + 0.5) * az_width
-    el = ELEV_MAX - (np.arange(rows) + 0.5) * el_width  # row 0 = top
+    el = LAYER_ELEVATIONS_RAD  # already sorted descending, row 0 = top
+
+    range_grid = np.full((rows, cols), 2.0)  # near wall baseline
+
+    # Far wall, columns 180-269
+    range_grid[:, 180:270] = 8.0
+    rng = np.random.default_rng(42)
+    far_noise = rng.uniform(-0.4, 0.4, size=(rows, 90))
+    range_grid[:, 180:270] += far_noise
+
+    # Doorway edge cut into the near wall: columns 90-95 are actually 1.0m
+    range_grid[:, 90:96] = 1.0
+
+    ghost_cells = [(2, 89), (3, 89), (5, 96), (6, 96), (9, 89)]
+    for r, c in ghost_cells:
+        range_grid[r, c] = 1.5  # smeared value between 1.0 and 2.0
+
+    popout_cells = [(7, 40)]
+    for r, c in popout_cells:
+        range_grid[r, c] = 1.2  # ~0.8m closer than the surrounding 2.0m wall
+
+    dropped_cells = [(0, 10), (4, 200), (11, 300)]  # simulate gaps
 
     pts = []
-    ranges_grid = np.full((rows, cols), 5.0)
-
-    # Doorway: columns 100-130 are actually 9.0m (real edge, not noise)
-    ranges_grid[:, 100:130] = 9.0
-
-    # Inject flying-pixel artifacts right at the edges (cols 99, 130) on a
-    # few rings -- values between 5.0 and 9.0, simulating beam straddling.
-    injected_cells = [(3, 99), (4, 99), (5, 130), (6, 130), (9, 99)]
-    for r, c in injected_cells:
-        ranges_grid[r, c] = 7.0  # smeared value between the two surfaces
-
+    orig_row_col = []
     for r in range(rows):
         for c in range(cols):
-            rng = ranges_grid[r, c]
-            x = rng * np.cos(el[r]) * np.cos(az[c])
-            y = rng * np.cos(el[r]) * np.sin(az[c])
-            z = rng * np.sin(el[r])
+            if (r, c) in dropped_cells:
+                continue
+            d = range_grid[r, c]
+            x = d * np.cos(el[r]) * np.cos(az[c])
+            y = d * np.cos(el[r]) * np.sin(az[c])
+            z = d * np.sin(el[r])
             pts.append((x, y, z))
+            orig_row_col.append((r, c))
 
     xyz = np.array(pts, dtype=np.float64)
-    return xyz, injected_cells
+    return xyz, ghost_cells, popout_cells, dropped_cells
 
 
 def main():
-    xyz, injected_cells = make_synthetic_scan()
+    xyz, ghost_cells, popout_cells, dropped_cells = make_synthetic_scan()
 
-    grid = compute_polar_grid(
-        xyz,
-        grid_rows=GRID_ROWS,
-        grid_cols=GRID_COLS,
-        elevation_min_rad=ELEV_MIN,
-        elevation_max_rad=ELEV_MAX,
-    )
+    grid = compute_polar_grid(xyz, LAYER_ELEVATIONS_RAD, GRID_COLS)
     print(f"Valid points: {grid['valid_mask'].sum()} / {len(xyz)}")
 
     range_img, point_idx_img = build_range_image(
         grid["row_idx"], grid["col_idx"], grid["ranges"], grid["orig_indices"],
-        GRID_ROWS, GRID_COLS,
+        grid["grid_rows"], GRID_COLS,
     )
-    print(f"Range image shape: {range_img.shape}, "
-          f"NaN cells: {np.isnan(range_img).sum()} (expect 0, every cell has a point)")
 
-    # Sanity check a known flat-wall cell and a known doorway cell.
-    print(f"Flat wall sample range_img[7, 50] = {range_img[7, 50]:.2f} (expect 5.00)")
-    print(f"Doorway sample   range_img[7, 115] = {range_img[7, 115]:.2f} (expect 9.00)")
-    for r, c in injected_cells:
-        print(f"Injected artifact range_img[{r},{c}] = {range_img[r, c]:.2f} (expect 7.00)")
+    print(f"\n--- Binning correctness (non-uniform layer spacing) ---")
+    print(f"Dropped-cell gaps preserved as NaN: "
+          f"{[np.isnan(range_img[r, c]) for r, c in dropped_cells]} (expect all True)")
+    print(f"Near wall sample range_img[7, 50] = {range_img[7, 50]:.2f} (expect 2.00)")
+    print(f"Far wall sample (noisy) range_img[7, 220] = {range_img[7, 220]:.2f} "
+          f"(expect ~8.0 +/- 0.4)")
 
-    scores = heuristic_candidate_scores(range_img)
-    candidates = get_candidate_cells(scores, threshold=1.5)
-    print(f"\nCandidates flagged: {len(candidates)}")
-    print(f"Candidates: {candidates}")
+    ghost_scores = ghost_candidate_scores(range_img, MAX_CANDIDATE_RANGE_M)
+    popout_scores = popout_candidate_scores(range_img, MAX_CANDIDATE_RANGE_M)
+    candidates = get_candidate_cells(ghost_scores, 0.3, popout_scores, 0.3)
+    flagged_cells = {(r, c) for r, c, _, _ in candidates}
 
-    injected_set = set(injected_cells)
-    flagged_set = set(candidates)
-    recall = len(injected_set & flagged_set) / len(injected_set)
-    print(f"\nRecall on injected artifacts: {recall:.2f} "
-          f"({len(injected_set & flagged_set)}/{len(injected_set)} caught)")
-    false_positives = flagged_set - injected_set
-    print(f"False positives (non-injected cells flagged): {len(false_positives)}")
-    if false_positives:
-        print(f"  -> {sorted(false_positives)}")
+    print(f"\n--- Candidate detection ---")
+    print(f"Total candidates flagged: {len(candidates)}")
+
+    far_range_flags = [(r, c, m, s) for r, c, m, s in candidates if c >= 180]
+    print(f"\nFar-range false positives (col >= 180): {len(far_range_flags)} (expect 0)")
+    if far_range_flags:
+        print(f"  -> {far_range_flags[:10]}")
+
+    ghost_set = set(ghost_cells)
+    ghost_recall = len(ghost_set & flagged_cells) / len(ghost_set)
+    print(f"\nGhost artifact recall: {ghost_recall:.2f} "
+          f"({len(ghost_set & flagged_cells)}/{len(ghost_set)} caught)")
+    print(f"Missed ghost cells: {ghost_set - flagged_cells}")
+
+    popout_set = set(popout_cells)
+    popout_recall = len(popout_set & flagged_cells) / len(popout_set)
+    print(f"\nPop-out artifact recall: {popout_recall:.2f} "
+          f"({len(popout_set & flagged_cells)}/{len(popout_set)} caught)")
+    print(f"Missed popout cells: {popout_set - flagged_cells}")
+
+    near_field_non_artifact_flags = [
+        (r, c, m, s) for r, c, m, s in candidates
+        if c < 180 and (r, c) not in ghost_set and (r, c) not in popout_set
+    ]
+    print(f"\nNear-field false positives (flagged but not injected): "
+          f"{len(near_field_non_artifact_flags)} (expect 0, or very few)")
+    if near_field_non_artifact_flags:
+        print(f"  -> {near_field_non_artifact_flags}")
 
 
 if __name__ == "__main__":

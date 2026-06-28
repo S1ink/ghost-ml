@@ -36,13 +36,15 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy
 from sensor_msgs.msg import PointCloud2, PointField, Joy
+from visualization_msgs.msg import Marker
 from sensor_msgs_py import point_cloud2 as pc2
 import rosbag2_py
 
 from grid_utils import (
     compute_polar_grid,
     build_range_image,
-    heuristic_candidate_scores,
+    ghost_candidate_scores,
+    popout_candidate_scores,
     get_candidate_cells,
 )
 
@@ -57,25 +59,40 @@ REVIEWED_SCANS_PATH = "reviewed_scans.jsonl"
 SESSION_ID = datetime.now(timezone.utc).strftime("session_%Y%m%d_%H%M%S")
 
 # ─────────────────────────────────────────────────────────────────────────
-# SENSOR / GRID GEOMETRY  -- FILL THESE IN FOR YOUR SENSOR
+# SENSOR / GRID GEOMETRY
+# Fill in LAYER_ELEVATIONS_DEG with your sensor's REAL per-layer angles --
+# see calibrate_layer_elevations.py to extract these empirically from a
+# raw (non-reduced) bag that still has ring data. Uniform spacing across
+# the FOV is NOT assumed; binning is nearest-angle against this list.
+# Order doesn't matter, it's sorted descending internally (row 0 = top).
 # ─────────────────────────────────────────────────────────────────────────
-GRID_ROWS = 14
+LAYER_ELEVATIONS_DEG = [
+    42.2, 35.0, 29.0, 24.5, 19.0, 14.8, 10.0,
+    5.5, 1.0, -4.0, -9.5, -14.0, -18.5, -22.2,
+]  # <-- PLACEHOLDER. Replace with calibrate_layer_elevations.py output.
 GRID_COLS = 360
-ELEVATION_MIN_DEG = -22.2
-ELEVATION_MAX_DEG = 42.2
 AZIMUTH_OFFSET_DEG = 0.0
 
-ELEVATION_MIN_RAD = math.radians(ELEVATION_MIN_DEG)
-ELEVATION_MAX_RAD = math.radians(ELEVATION_MAX_DEG)
+LAYER_ELEVATIONS_RAD = [math.radians(d) for d in LAYER_ELEVATIONS_DEG]
 AZIMUTH_OFFSET_RAD = math.radians(AZIMUTH_OFFSET_DEG)
 
 # ─────────────────────────────────────────────────────────────────────────
-# HEURISTIC THRESHOLD -- deliberately loose; false positives just cost a
-# quick deny click, false negatives cost a missed label. Tune by watching
-# how many candidates show up per scan; you said 5-20 true errors per scan,
-# so if you're seeing wildly more than that, raise the threshold.
+# HEURISTIC THRESHOLDS
+# Both detectors are range-gated: only points within MAX_CANDIDATE_RANGE_M
+# of the sensor are eligible to be flagged at all. This is the main lever
+# for far-range false positives -- if you're still seeing far points
+# flagged, this constant is too high, not the per-detector thresholds.
 # ─────────────────────────────────────────────────────────────────────────
-HEURISTIC_THRESHOLD = 1.0  # meters; see grid_utils.heuristic_candidate_scores
+MAX_CANDIDATE_RANGE_M = 3.0
+GHOST_THRESHOLD_M = 0.3       # ghost_candidate_scores: min mismatch to flag
+GHOST_MIN_CONTEXT_JUMP_M = 0.3  # ghost: how big a nearby transition must be to even consider this cell
+POPOUT_THRESHOLD_M = 0.3      # popout_candidate_scores: min "closer than everything around it" margin
+POPOUT_WINDOW_RADIUS = 5      # popout: how many same-ring neighbors each side to compare against
+
+# ─────────────────────────────────────────────────────────────────────────
+# FAST-FORWARD (your bags are long; you don't need to review every scan)
+# ─────────────────────────────────────────────────────────────────────────
+SKIP_JUMP_SIZE = 25  # scans skipped per LB press; tune to taste
 
 # ─────────────────────────────────────────────────────────────────────────
 # CONTROLLER BINDINGS -- VERIFY against `ros2 topic echo /joy` for your
@@ -91,6 +108,7 @@ BTN_A = 0       # advance to next candidate (skip, no label)
 BTN_B = 1       # finish scan now (mark reviewed, jump to next scan)
 BTN_X = 2       # undo last label
 BTN_Y = 3       # mark whole scan clean (deny-all remaining candidates quickly)
+BTN_LB = 4      # fast-forward: skip SKIP_JUMP_SIZE scans forward without reviewing
 BTN_RB = 5      # jump back one scan (for re-review)
 # force-flush ledger to disk (auto-flushes after every write anyway)
 BTN_START = 7
@@ -108,6 +126,13 @@ COLOR_CONFIRMED = (255, 140, 0)             # orange flash: just confirmed
 COLOR_DENIED = (90, 90, 220)                # blue flash: just denied
 
 REPUBLISH_RATE_HZ = 8.0  # keep the cloud "live" in Foxglove between inputs
+
+# A single colored point is hard to spot in a few thousand others at
+# typical zoom levels -- a sphere marker around the current candidate
+# makes it actually pop visually instead of relying on color alone.
+MARKER_TOPIC = "/annotator/current_candidate_marker"
+MARKER_RADIUS_M = 0.05
+MARKER_COLOR = (1.0, 1.0, 1.0, 0.85)  # white, slightly transparent (r,g,b,a 0-1)
 
 
 def pack_rgb_float(r: int, g: int, b: int) -> float:
@@ -191,12 +216,15 @@ class AnnotatorNode(Node):
         self.declare_parameter('output_cloud_topic', OUTPUT_CLOUD_TOPIC)
         self.declare_parameter('ledger_path', LEDGER_PATH)
         self.declare_parameter('reviewed_scans_path', REVIEWED_SCANS_PATH)
-        self.declare_parameter('grid_rows', GRID_ROWS)
+        self.declare_parameter('layer_elevations_deg', LAYER_ELEVATIONS_DEG)
         self.declare_parameter('grid_cols', GRID_COLS)
-        self.declare_parameter('elevation_min_deg', ELEVATION_MIN_DEG)
-        self.declare_parameter('elevation_max_deg', ELEVATION_MAX_DEG)
         self.declare_parameter('azimuth_offset_deg', AZIMUTH_OFFSET_DEG)
-        self.declare_parameter('heuristic_threshold', HEURISTIC_THRESHOLD)
+        self.declare_parameter('max_candidate_range_m', MAX_CANDIDATE_RANGE_M)
+        self.declare_parameter('ghost_threshold_m', GHOST_THRESHOLD_M)
+        self.declare_parameter('ghost_min_context_jump_m', GHOST_MIN_CONTEXT_JUMP_M)
+        self.declare_parameter('popout_threshold_m', POPOUT_THRESHOLD_M)
+        self.declare_parameter('popout_window_radius', POPOUT_WINDOW_RADIUS)
+        self.declare_parameter('skip_jump_size', SKIP_JUMP_SIZE)
 
         # Retrieve parameter values
         self._bag_path = self.get_parameter('bag_path').get_parameter_value().string_value
@@ -210,16 +238,18 @@ class AnnotatorNode(Node):
         self._output_cloud_topic = self.get_parameter('output_cloud_topic').get_parameter_value().string_value
         self._ledger_path = self.get_parameter('ledger_path').get_parameter_value().string_value
         self._reviewed_scans_path = self.get_parameter('reviewed_scans_path').get_parameter_value().string_value
-        
-        self._grid_rows = self.get_parameter('grid_rows').get_parameter_value().integer_value
-        self._grid_cols = self.get_parameter('grid_cols').get_parameter_value().integer_value
-        self._elevation_min_deg = self.get_parameter('elevation_min_deg').get_parameter_value().double_value
-        self._elevation_max_deg = self.get_parameter('elevation_max_deg').get_parameter_value().double_value
-        self._azimuth_offset_deg = self.get_parameter('azimuth_offset_deg').get_parameter_value().double_value
-        self._heuristic_threshold = self.get_parameter('heuristic_threshold').get_parameter_value().double_value
 
-        self._elevation_min_rad = math.radians(self._elevation_min_deg)
-        self._elevation_max_rad = math.radians(self._elevation_max_deg)
+        self._layer_elevations_deg = self.get_parameter('layer_elevations_deg').get_parameter_value().double_array_value
+        self._layer_elevations_rad = np.radians(np.array(self._layer_elevations_deg, dtype=np.float64))
+        self._grid_cols = self.get_parameter('grid_cols').get_parameter_value().integer_value
+        self._azimuth_offset_deg = self.get_parameter('azimuth_offset_deg').get_parameter_value().double_value
+        self._max_candidate_range_m = self.get_parameter('max_candidate_range_m').get_parameter_value().double_value
+        self._ghost_threshold_m = self.get_parameter('ghost_threshold_m').get_parameter_value().double_value
+        self._ghost_min_context_jump_m = self.get_parameter('ghost_min_context_jump_m').get_parameter_value().double_value
+        self._popout_threshold_m = self.get_parameter('popout_threshold_m').get_parameter_value().double_value
+        self._popout_window_radius = self.get_parameter('popout_window_radius').get_parameter_value().integer_value
+        self._skip_jump_size = self.get_parameter('skip_jump_size').get_parameter_value().integer_value
+
         self._azimuth_offset_rad = math.radians(self._azimuth_offset_deg)
 
         # ---- ledger setup ----
@@ -257,6 +287,7 @@ class AnnotatorNode(Node):
         )
         self._cloud_pub = self.create_publisher(
             PointCloud2, self._output_cloud_topic, qos)
+        self._marker_pub = self.create_publisher(Marker, MARKER_TOPIC, qos)
         self.create_subscription(Joy, "/joy", self._on_joy, qos)
 
         self.create_timer(1.0 / REPUBLISH_RATE_HZ,
@@ -361,7 +392,7 @@ class AnnotatorNode(Node):
         xyz = scan["xyz"]
 
         grid = compute_polar_grid(
-            xyz, self._grid_rows, self._grid_cols, self._elevation_min_rad, self._elevation_max_rad,
+            xyz, self._layer_elevations_rad, self._grid_cols,
             azimuth_offset_rad=self._azimuth_offset_rad,
         )
         range_img, point_idx_img = build_range_image(
@@ -369,23 +400,34 @@ class AnnotatorNode(Node):
             grid["col_idx"],
             grid["ranges"],
             grid["orig_indices"],
-            self._grid_rows, self._grid_cols,
+            grid["grid_rows"], self._grid_cols,
         )
-        scores = heuristic_candidate_scores(range_img)
-        candidates = get_candidate_cells(scores, self._heuristic_threshold)
+        ghost_scores = ghost_candidate_scores(
+            range_img, self._max_candidate_range_m, self._ghost_min_context_jump_m,
+        )
+        popout_scores = popout_candidate_scores(
+            range_img, self._max_candidate_range_m, self._popout_window_radius,
+        )
+        candidates = get_candidate_cells(
+            ghost_scores, self._ghost_threshold_m,
+            popout_scores, self._popout_threshold_m,
+        )
+        # candidates is now (row, col, mechanism, score) -- keep the full
+        # tuples for ledger metadata, but candidate cells/pointer logic
+        # elsewhere only needs (row, col), so also keep a cells-only view.
+        candidate_cells = [(r, c) for r, c, _, _ in candidates]
 
         self._current_scan_state = {
             "stamp_ns": scan["stamp_ns"],
             "xyz": xyz,
             "range_img": range_img,
             "point_idx_img": point_idx_img,
-            "scores": scores,
-            # list of (row, col), score-sorted
-            "candidates": candidates,
+            "ghost_scores": ghost_scores,
+            "popout_scores": popout_scores,
+            "candidates": candidate_cells,       # list of (row, col), score-sorted
+            "candidate_meta": {(r, c): (mech, score) for r, c, mech, score in candidates},
             "candidate_ptr": 0,
-            # (row,col) -> "artifact"/"clean"
-            "decided": {},
-            # ((row,col), color, expiry_time) or None
+            "decided": {},                        # (row,col) -> "artifact"/"clean"
             "flash": None,
         }
         self.get_logger().info(
@@ -433,8 +475,30 @@ class AnnotatorNode(Node):
             self._mark_scan_clean_and_advance()
         elif button_pressed(BTN_RB):
             self._load_scan(self._scan_idx - 1)
+        elif button_pressed(BTN_LB):
+            self._skip_forward()
 
         self._prev_buttons = list(buttons)
+
+    def _skip_forward(self):
+        """
+        Fast-forward without reviewing -- for long bags where you don't
+        need every single frame. Logged to the reviewed-scans ledger with
+        skipped=True so you can later tell "actually reviewed" apart from
+        "jumped past" when checking dataset coverage.
+        """
+        st = self._current_scan_state
+        review_record = {
+            "bag": os.path.basename(self._bag_path),
+            "scan_stamp_ns": st["stamp_ns"],
+            "n_candidates": len(st["candidates"]),
+            "n_confirmed": 0,
+            "session": SESSION_ID,
+            "skipped": True,
+        }
+        self._reviewed_file.write(json.dumps(review_record) + "\n")
+        self._reviewed_file.flush()
+        self._load_scan(self._scan_idx + self._skip_jump_size)
 
     # ─────────────────────────────────────────────────────────────────
     # Labeling actions
@@ -451,6 +515,7 @@ class AnnotatorNode(Node):
             return
         st = self._current_scan_state
         row, col = cell
+        mechanism, score = st["candidate_meta"].get(cell, ("unknown", 0.0))
 
         record = {
             "bag": os.path.basename(self._bag_path),
@@ -458,7 +523,8 @@ class AnnotatorNode(Node):
             "ring": int(row),
             "azimuth_idx": int(col),
             "range_m": float(st["range_img"][row, col]),
-            "heuristic_score": float(st["scores"][row, col]),
+            "heuristic_mechanism": mechanism,
+            "heuristic_score": float(score),
             "label": label,  # "artifact" or "clean"
             "session": SESSION_ID,
         }
@@ -508,13 +574,15 @@ class AnnotatorNode(Node):
             row, col = cell
             if cell in st["decided"]:
                 continue
+            mechanism, score = st["candidate_meta"].get(cell, ("unknown", 0.0))
             record = {
                 "bag": os.path.basename(self._bag_path),
                 "scan_stamp_ns": st["stamp_ns"],
                 "ring": int(row),
                 "azimuth_idx": int(col),
                 "range_m": float(st["range_img"][row, col]),
-                "heuristic_score": float(st["scores"][row, col]),
+                "heuristic_mechanism": mechanism,
+                "heuristic_score": float(score),
                 "label": "clean",
                 "session": SESSION_ID,
             }
@@ -568,6 +636,40 @@ class AnnotatorNode(Node):
 
         cloud_msg = self._build_xyzrgb_cloud(xyz, colors)
         self._cloud_pub.publish(cloud_msg)
+        self._publish_current_marker(current_cell)
+
+    def _publish_current_marker(self, current_cell):
+        marker = Marker()
+        marker.header.frame_id = self._frame_id
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "annotator"
+        marker.id = 0
+        marker.type = Marker.SPHERE
+
+        if current_cell is None:
+            marker.action = Marker.DELETE
+            self._marker_pub.publish(marker)
+            return
+
+        st = self._current_scan_state
+        row, col = current_cell
+        point_idx = st["point_idx_img"][row, col]
+        if point_idx < 0:
+            marker.action = Marker.DELETE
+            self._marker_pub.publish(marker)
+            return
+
+        x, y, z = st["xyz"][point_idx]
+        marker.action = Marker.ADD
+        marker.pose.position.x = float(x)
+        marker.pose.position.y = float(y)
+        marker.pose.position.z = float(z)
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = marker.scale.y = marker.scale.z = MARKER_RADIUS_M * 2.0
+        marker.color.r, marker.color.g, marker.color.b, marker.color.a = MARKER_COLOR
+        # No lifetime set -> persists until next publish overwrites/deletes
+        # it, which happens every republish tick anyway.
+        self._marker_pub.publish(marker)
 
     def _build_xyzrgb_cloud(self, xyz: np.ndarray, rgb_packed: np.ndarray) -> PointCloud2:
         header_stamp = self.get_clock().now().to_msg()
