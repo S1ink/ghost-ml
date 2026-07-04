@@ -13,6 +13,7 @@
             "bag_path": "",
             "input_cloud_topic": "/multiscan/lidar_scan",
             "output_cloud_topic": "/annotator/colorized_cloud",
+            "output_range_image_topic": "/annotator/range_image",
             "ledger_path": "labels_ledger.jsonl",
             "reviewed_scans_path": "reviewed_scans.jsonl",
             "layer_elevations_deg": [
@@ -33,9 +34,9 @@
             ],
             "grid_cols": 360,
             "azimuth_offset_deg": 0.0,
-            "max_candidate_range_m": 3.0,
-            "ghost_threshold_m": 0.3,
-            "ghost_min_context_jump_m": 0.3,
+            "max_candidate_range_m": 1.5,
+            "ghost_threshold_m": 0.5,
+            "ghost_min_context_jump_m": 0.2,
             "popout_threshold_m": 0.3,
             "popout_window_radius": 5,
             "skip_jump_size": 25

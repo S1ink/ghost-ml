@@ -35,7 +35,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy
-from sensor_msgs.msg import PointCloud2, PointField, Joy
+from sensor_msgs.msg import PointCloud2, PointField, Joy, Image
 from visualization_msgs.msg import Marker
 from sensor_msgs_py import point_cloud2 as pc2
 import rosbag2_py
@@ -53,6 +53,7 @@ from grid_utils import (
 # ─────────────────────────────────────────────────────────────────────────
 INPUT_CLOUD_TOPIC = "/multiscan/lidar_scan"       # <-- confirm matches your bag
 OUTPUT_CLOUD_TOPIC = "/annotator/colorized_cloud"  # what you point Foxglove at
+OUTPUT_RANGE_IMAGE_TOPIC = "/annotator/range_image"
 
 LEDGER_PATH = "labels_ledger.jsonl"
 REVIEWED_SCANS_PATH = "reviewed_scans.jsonl"
@@ -214,6 +215,7 @@ class AnnotatorNode(Node):
         self.declare_parameter('bag_path', bag_path or '')
         self.declare_parameter('input_cloud_topic', INPUT_CLOUD_TOPIC)
         self.declare_parameter('output_cloud_topic', OUTPUT_CLOUD_TOPIC)
+        self.declare_parameter('output_range_image_topic', OUTPUT_RANGE_IMAGE_TOPIC)
         self.declare_parameter('ledger_path', LEDGER_PATH)
         self.declare_parameter('reviewed_scans_path', REVIEWED_SCANS_PATH)
         self.declare_parameter('layer_elevations_deg', LAYER_ELEVATIONS_DEG)
@@ -236,6 +238,7 @@ class AnnotatorNode(Node):
         # Resolve paths/topics
         self._input_cloud_topic = self.get_parameter('input_cloud_topic').get_parameter_value().string_value
         self._output_cloud_topic = self.get_parameter('output_cloud_topic').get_parameter_value().string_value
+        self._output_range_image_topic = self.get_parameter('output_range_image_topic').get_parameter_value().string_value
         self._ledger_path = self.get_parameter('ledger_path').get_parameter_value().string_value
         self._reviewed_scans_path = self.get_parameter('reviewed_scans_path').get_parameter_value().string_value
 
@@ -287,6 +290,8 @@ class AnnotatorNode(Node):
         )
         self._cloud_pub = self.create_publisher(
             PointCloud2, self._output_cloud_topic, qos)
+        self._image_pub = self.create_publisher(
+            Image, self._output_range_image_topic, qos)
         self._marker_pub = self.create_publisher(Marker, MARKER_TOPIC, qos)
         self.create_subscription(Joy, "/joy", self._on_joy, qos)
 
@@ -634,14 +639,16 @@ class AnnotatorNode(Node):
             # already-decided, non-current, non-flashing candidates fall
             # back to COLOR_NORMAL so the scan reads cleanly as you progress
 
-        cloud_msg = self._build_xyzrgb_cloud(xyz, colors)
+        now_stamp = self.get_clock().now().to_msg()
+        cloud_msg = self._build_xyzrgb_cloud(xyz, colors, now_stamp)
         self._cloud_pub.publish(cloud_msg)
-        self._publish_current_marker(current_cell)
+        self._publish_current_marker(current_cell, now_stamp)
+        self._publish_range_image(st["ghost_scores"], now_stamp)
 
-    def _publish_current_marker(self, current_cell):
+    def _publish_current_marker(self, current_cell, header_stamp):
         marker = Marker()
         marker.header.frame_id = self._frame_id
-        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.header.stamp = header_stamp
         marker.ns = "annotator"
         marker.id = 0
         marker.type = Marker.SPHERE
@@ -671,8 +678,23 @@ class AnnotatorNode(Node):
         # it, which happens every republish tick anyway.
         self._marker_pub.publish(marker)
 
-    def _build_xyzrgb_cloud(self, xyz: np.ndarray, rgb_packed: np.ndarray) -> PointCloud2:
-        header_stamp = self.get_clock().now().to_msg()
+    def _publish_range_image(self, range_img: np.ndarray, header_stamp):
+        img_msg = Image()
+        img_msg.header.stamp = header_stamp
+        img_msg.header.frame_id = self._frame_id
+        img_msg.height = range_img.shape[0]
+        img_msg.width = range_img.shape[1]
+        img_msg.encoding = "32FC1"
+        img_msg.is_bigendian = 0
+        img_msg.step = range_img.shape[1] * 4  # 4 bytes per float32
+        
+        # Ensure contiguous copy of float32
+        range_img_contiguous = np.ascontiguousarray(range_img, dtype=np.float32)
+        img_msg.data = range_img_contiguous.tobytes()
+        
+        self._image_pub.publish(img_msg)
+
+    def _build_xyzrgb_cloud(self, xyz: np.ndarray, rgb_packed: np.ndarray, header_stamp) -> PointCloud2:
         fields = [
             PointField(name="x", offset=0,
                        datatype=PointField.FLOAT32, count=1),
