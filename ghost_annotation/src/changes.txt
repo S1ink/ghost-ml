@@ -1,0 +1,84 @@
+Yes, `compute_polar_grid` and `build_range_image` from `grid_utils.py` address all four issues directly. The wiring is straightforward since the interfaces were designed with this exact use case in mind. Here is a minimal, step-by-step plan.
+
+---
+
+**Prerequisites.** `grid_utils.py` must be importable from the same directory as `img_annotator_node.py`. Add this import at the top of the file:
+```python
+from grid_utils import compute_polar_grid, build_range_image
+```
+
+---
+
+**Step 1. Add `LAYER_ELEVATIONS_DEG` to the constants block.**
+
+Add the same constant used in `pc_annotator_node.py` (the placeholder list, with the same note to replace it with output from `calibrate_layer_elevations.py`). Keep `FOV_UP_DEG` and `FOV_DOWN_DEG`. They are still needed for aspect ratio in `build_layer_row_map`. They are no longer used for ring assignment.
+
+Also add `GRID_COLS = 360` as a fixed constant. Remove `RING_FIELD` and `RANGE_FIELD` entirely since neither is needed once `compute_polar_grid` handles all assignment from XYZ.
+
+---
+
+**Step 2. Fix `build_layer_row_map`.**
+
+Change its signature from `(num_layers, fov_up_deg, fov_down_deg, img_width)` to `(layer_elevations_rad, fov_up_deg, fov_down_deg, img_width)`. Keep the aspect ratio and `img_height` calculation unchanged. Replace the uniform row-per-layer body with proportional placement based on each layer's actual elevation angle within the FOV:
+
+```python
+el_max = math.radians(fov_up_deg)
+el_min = math.radians(-fov_down_deg)
+el_span = el_max - el_min
+
+sorted_layers = np.sort(layer_elevations_rad)[::-1]  # descending, row 0 = top
+
+layer_to_row = np.clip(
+    np.round((1.0 - (sorted_layers - el_min) / el_span) * (img_height - 1)).astype(np.int32),
+    0, img_height - 1,
+)
+actual_height = img_height
+```
+
+Return `layer_to_row, actual_height` as before.
+
+---
+
+**Step 3. Replace the body of `_process_cloud`.**
+
+Remove: the `has_ring`/`has_range` field detection, both ring assignment branches, both `col_idx` assignment branches (organized and unorganized), the manual `for i in order` grid fill loop, the dynamic `num_cols` determination from ring counts, and the post-hoc `np.roll` azimuth offset block.
+
+Replace with:
+
+```python
+x = np.asarray(pts["x"], dtype=np.float64)
+y = np.asarray(pts["y"], dtype=np.float64)
+z = np.asarray(pts["z"], dtype=np.float64)
+xyz = np.column_stack([x, y, z])
+
+layer_elevations_rad = np.radians(np.array(LAYER_ELEVATIONS_DEG))
+
+grid = compute_polar_grid(
+    xyz,
+    layer_elevations_rad,
+    GRID_COLS,
+    azimuth_offset_rad=math.radians(self._azimuth_offset_deg),
+)
+range_grid, point_idx_img = build_range_image(
+    grid["row_idx"], grid["col_idx"], grid["ranges"], grid["orig_indices"],
+    grid["grid_rows"], GRID_COLS,
+)
+
+self._xyz           = xyz.astype(np.float32)
+self._ranges_flat   = grid["ranges"].astype(np.float32)
+self._range_grid    = range_grid
+self._point_idx_img = point_idx_img
+self._num_cols      = GRID_COLS
+```
+
+Keep the `if num_cols != self._img_width` image geometry update block. Change its guard to `if GRID_COLS != self._img_width` and update the `build_layer_row_map` call to pass `layer_elevations_rad` as the first argument instead of `self._num_layers`.
+
+---
+
+**Step 4. Clean up parameters.**
+
+Remove the `ring_field`, `range_field`, `num_layers`, and their `declare_parameter`/`get_parameter` calls in `__init__`. Add `layer_elevations_deg` and `grid_cols` in their place, mirroring `pc_annotator_node.py`. Remove `self._ring_field`, `self._range_field`, `self._num_layers` instance variables. Replace all remaining uses of `self._num_layers` in `_process_cloud`, `_step_layer`, `_publish_cloud`, `_publish_selection_annotations`, and `_publish_image` with `grid["grid_rows"]` (stored as `self._grid_rows`) or `len(LAYER_ELEVATIONS_DEG)`.
+
+---
+
+That is the complete set of changes. No other methods need touching. `_publish_image`, `_publish_cloud`, `_publish_cursor_annotation`, `_publish_selection_annotations`, and all ledger I/O remain exactly as they are.

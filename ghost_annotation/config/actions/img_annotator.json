@@ -1,0 +1,43 @@
+{
+    "img_annotator":
+    {
+        "pragma:default": null,
+
+        "multiscan":
+        {
+            "pragma:node_options":
+            {
+                "emulate_tty": true
+            },
+
+            "bag_path": "",
+            "input_cloud_topic": "/multiscan/lidar_scan",
+            "output_cloud_topic": "/annotator/range_cloud",
+            "output_image_topic": "/annotator/range_image",
+            "layer_elevations_deg": [
+                -22.401267,
+                -17.381588,
+                -12.517322,
+                -7.570485,
+                -2.776330,
+                1.975143,
+                6.707669,
+                12.561870,
+                16.890294,
+                21.501859,
+                26.252196,
+                31.171700,
+                36.355191,
+                41.890844
+            ],
+            "grid_cols": 360,
+            "fov_up_deg": 41.891,
+            "fov_down_deg": 22.401,
+            "azimuth_offset_deg": 0.0,
+            "cursor_speed": 1,
+            "ledger_path": "range_annotations_ledger.jsonl",
+            "reviewed_scans_path": "range_annotations_reviewed.jsonl",
+            "skip_jump_size": 25
+        }
+    }
+}

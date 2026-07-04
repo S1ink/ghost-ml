@@ -6,7 +6,8 @@
         "../../launch_utils/config/actions/foxglove.json",
         "../../launch_utils/config/actions/joy.json",
         "../../launch_utils/config/actions/tf.json",
-        "actions/annotator.json",
+        "actions/img_annotator.json",
+        "actions/pc_annotator.json",
         "presets/annotation.json"
     ]
 }

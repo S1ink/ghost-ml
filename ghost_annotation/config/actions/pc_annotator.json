@@ -1,5 +1,5 @@
 {
-    "annotator":
+    "pc_annotator":
     {
         "pragma:default": null,
 
@@ -13,7 +13,7 @@
             "bag_path": "",
             "input_cloud_topic": "/multiscan/lidar_scan",
             "output_cloud_topic": "/annotator/colorized_cloud",
-            "output_range_image_topic": "/annotator/range_image",
+            "output_image_topic": "/annotator/range_image",
             "ledger_path": "labels_ledger.jsonl",
             "reviewed_scans_path": "reviewed_scans.jsonl",
             "layer_elevations_deg": [

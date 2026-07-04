@@ -1,5 +1,5 @@
 {
-    "annotation":
+    "pc_annotation":
     {
         "pragma:default": null,
 
@@ -10,7 +10,7 @@
                 "joy_node": "enabled",
                 "foxglove_bridge": "all",
                 "robot_tf": "lance",
-                "annotator": "multiscan"
+                "pc_annotator": "multiscan"
             }
         },
         "lance2":
@@ -20,7 +20,33 @@
                 "joy_node": "enabled",
                 "foxglove_bridge": "all",
                 "robot_tf": "lance2",
-                "annotator": "multiscan"
+                "pc_annotator": "multiscan"
+            }
+        }
+    },
+
+    "img_annotation":
+    {
+        "pragma:default": null,
+
+        "lance1":
+        {
+            "pragma:action_overrides":
+            {
+                "joy_node": "enabled",
+                "foxglove_bridge": "all",
+                "robot_tf": "lance",
+                "img_annotator": "multiscan"
+            }
+        },
+        "lance2":
+        {
+            "pragma:action_overrides":
+            {
+                "joy_node": "enabled",
+                "foxglove_bridge": "all",
+                "robot_tf": "lance2",
+                "img_annotator": "multiscan"
             }
         }
     }

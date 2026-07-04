@@ -207,7 +207,7 @@ def prompt_bag_path(default_path=None):
         return default_path
 
 
-class AnnotatorNode(Node):
+class PcAnnotatorNode(Node):
     def __init__(self, bag_path: str = None):
         super().__init__("lidar_annotator")
 
@@ -215,7 +215,7 @@ class AnnotatorNode(Node):
         self.declare_parameter('bag_path', bag_path or '')
         self.declare_parameter('input_cloud_topic', INPUT_CLOUD_TOPIC)
         self.declare_parameter('output_cloud_topic', OUTPUT_CLOUD_TOPIC)
-        self.declare_parameter('output_range_image_topic', OUTPUT_RANGE_IMAGE_TOPIC)
+        self.declare_parameter('output_image_topic', OUTPUT_RANGE_IMAGE_TOPIC)
         self.declare_parameter('ledger_path', LEDGER_PATH)
         self.declare_parameter('reviewed_scans_path', REVIEWED_SCANS_PATH)
         self.declare_parameter('layer_elevations_deg', LAYER_ELEVATIONS_DEG)
@@ -238,7 +238,7 @@ class AnnotatorNode(Node):
         # Resolve paths/topics
         self._input_cloud_topic = self.get_parameter('input_cloud_topic').get_parameter_value().string_value
         self._output_cloud_topic = self.get_parameter('output_cloud_topic').get_parameter_value().string_value
-        self._output_range_image_topic = self.get_parameter('output_range_image_topic').get_parameter_value().string_value
+        self._output_range_image_topic = self.get_parameter('output_image_topic').get_parameter_value().string_value
         self._ledger_path = self.get_parameter('ledger_path').get_parameter_value().string_value
         self._reviewed_scans_path = self.get_parameter('reviewed_scans_path').get_parameter_value().string_value
 
@@ -735,7 +735,7 @@ def main():
     rclpy.init()
     node = None
     try:
-        node = AnnotatorNode()
+        node = PcAnnotatorNode()
         rclpy.spin(node)
     except (KeyboardInterrupt, RuntimeError, FileNotFoundError) as e:
         print(f"Annotator exiting: {e}")
