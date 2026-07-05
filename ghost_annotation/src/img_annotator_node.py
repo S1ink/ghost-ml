@@ -122,23 +122,24 @@ CURSOR_INVERT_V = True
 
 # ── Visual colours ─────────────────────────────────────────────────────────────
 # 3D point cloud (R, G, B, 0-255).
-COLOR_DEFAULT_CLOUD = (255, 255, 255)
+COLOR_DEFAULT_CLOUD = (175, 175, 175)
 COLOR_CURSOR_CLOUD  = (0,   220, 220)   # cyan
-COLOR_SELECT_CLOUD  = (255, 220,  30)   # amber
+COLOR_SELECT_CLOUD  = (255, 30,  30)   # amber
 
 # Image annotation markers (R, G, B, 0-255).
 COLOR_CURSOR_IMG = (0,   220, 220)      # cyan
-COLOR_SELECT_IMG = (255, 220,  30)      # amber
+COLOR_SELECT_IMG = (255, 30,  30)      # amber
 
 # 3D sphere marker for cursor point.
-MARKER_RADIUS_M = 0.08
+MARKER_RADIUS_M = 0.045
 MARKER_COLOR    = (0.0, 1.0, 1.0, 0.9)  # (r, g, b, a) 0-1
+MARKER_SELECTED_COLOR = (1.0, 0.1, 0.1, 0.9)
 
 REPUBLISH_HZ = 10.0
 
 LEDGER_PATH         = "range_annotations_ledger.jsonl"
 REVIEWED_SCANS_PATH = "range_annotations_reviewed.jsonl"
-SKIP_JUMP_SIZE      = 25
+SKIP_JUMP_SIZE      = 100
 SESSION_ID = datetime.now(timezone.utc).strftime("session_%Y%m%d_%H%M%S")
 
 # Controller buttons.
@@ -780,7 +781,7 @@ class ImageAnnotatorNode(Node):
         marker.pose.orientation.w = 1.0
         d = MARKER_RADIUS_M * 2.0
         marker.scale.x = marker.scale.y = marker.scale.z = d
-        marker.color.r, marker.color.g, marker.color.b, marker.color.a = MARKER_COLOR
+        marker.color.r, marker.color.g, marker.color.b, marker.color.a = MARKER_SELECTED_COLOR if ((cur_layer, cur_col) in self._selected) else MARKER_COLOR
         self._marker_pub.publish(marker)
 
     def _publish_cloud(self, stamp) -> None:
