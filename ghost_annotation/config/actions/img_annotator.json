@@ -34,7 +34,7 @@
             "fov_up_deg": 41.891,
             "fov_down_deg": 22.401,
             "azimuth_offset_deg": 0.0,
-            "cursor_speed": 1,
+            "cursor_speed": 50,
             "ledger_path": "range_annotations_ledger.jsonl",
             "reviewed_scans_path": "range_annotations_reviewed.jsonl",
             "skip_jump_size": 100

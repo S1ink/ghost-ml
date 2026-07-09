@@ -55,6 +55,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy
+from rclpy.time import Time as RclTime
 from sensor_msgs.msg import Image, Joy, PointCloud2, PointField
 from sensor_msgs_py import point_cloud2 as pc2
 from std_msgs.msg import Header, ColorRGBA
@@ -102,7 +103,7 @@ AZIMUTH_OFFSET_DEG = 0.0
 # deflection. Keep this low -- the d-pad handles precise single-step movement.
 CURSOR_SPEED_DEFAULT = 1
 CURSOR_SPEED_MIN     = 1
-CURSOR_SPEED_MAX     = 20
+CURSOR_SPEED_MAX     = 100
 
 AXIS_STICK_H  = 0   # left-stick horizontal (left = negative)
 AXIS_STICK_V  = 1   # left-stick vertical   (up = positive on most drivers)
@@ -162,8 +163,6 @@ def pack_rgb_float(r: int, g: int, b: int) -> float:
 
 def build_layer_row_map(
     layer_elevations_rad: np.ndarray,
-    fov_up_deg: float,
-    fov_down_deg: float,
     img_width: int,
 ) -> tuple[np.ndarray, int]:
     """
@@ -172,16 +171,16 @@ def build_layer_row_map(
     Image height is set by the hFOV/vFOV aspect ratio (360 deg / total vFOV).
     Row 0 = top of image = highest elevation.
     """
-    total_fov_deg = fov_up_deg + fov_down_deg
-    aspect_ratio  = 360.0 / total_fov_deg
-    img_height    = round(img_width / aspect_ratio)
-
-    el_max  = math.radians(fov_up_deg)
-    el_min  = math.radians(-fov_down_deg)
-    el_span = el_max - el_min
-
     # Sort descending so index 0 = highest elevation = row 0 (top).
     sorted_layers = np.sort(layer_elevations_rad)[::-1]
+
+    total_fov = sorted_layers[0] - sorted_layers[-1]
+    aspect_ratio  = math.pi * 2 / total_fov
+    img_height    = round(img_width / aspect_ratio)
+
+    el_max  = sorted_layers[0]
+    el_min  = sorted_layers[-1]
+    el_span = el_max - el_min
 
     layer_to_row = np.clip(
         np.round(
@@ -254,8 +253,6 @@ class ImageAnnotatorNode(Node):
         self.declare_parameter("output_image_topic",   OUTPUT_IMAGE_TOPIC)
         self.declare_parameter("layer_elevations_deg", LAYER_ELEVATIONS_DEG)
         self.declare_parameter("grid_cols",            GRID_COLS)
-        self.declare_parameter("fov_up_deg",           FOV_UP_DEG)
-        self.declare_parameter("fov_down_deg",         FOV_DOWN_DEG)
         self.declare_parameter("azimuth_offset_deg",   AZIMUTH_OFFSET_DEG)
         self.declare_parameter("cursor_speed",         CURSOR_SPEED_DEFAULT)
         self.declare_parameter("ledger_path",          LEDGER_PATH)
@@ -272,8 +269,6 @@ class ImageAnnotatorNode(Node):
             np.array(self._layer_elevations_deg, dtype=np.float64)
         )
         self._grid_cols            = int(p("grid_cols").value)
-        self._fov_up_deg           = p("fov_up_deg").value
-        self._fov_down_deg         = p("fov_down_deg").value
         self._azimuth_offset_deg   = p("azimuth_offset_deg").value
         self._ledger_path          = p("ledger_path").value
         self._reviewed_scans_path  = p("reviewed_scans_path").value
@@ -317,6 +312,8 @@ class ImageAnnotatorNode(Node):
         self._img_width:     int = 0
 
         self._selected:     set[tuple[int, int]] = set()
+        self._cursor_x:     float = 0
+        self._cursor_y:     float = 0
         self._cursor_layer: int = 0
         self._cursor_col:   int = 0
         self._col_accum:    float = 0.0
@@ -325,6 +322,7 @@ class ImageAnnotatorNode(Node):
         self._load_scan(self._scan_idx)
 
         # Input edge-detection state.
+        self._prev_joy_time: RclTime    = None
         self._prev_buttons: list[int]   = []
         self._prev_axes:    list[float] = []
 
@@ -452,7 +450,6 @@ class ImageAnnotatorNode(Node):
             self._img_width = self._grid_cols
             self._layer_to_row, self._img_height = build_layer_row_map(
                 self._layer_elevations_rad,
-                self._fov_up_deg, self._fov_down_deg,
                 self._grid_cols,
             )
             self.get_logger().info(
@@ -470,10 +467,15 @@ class ImageAnnotatorNode(Node):
         buttons = list(msg.buttons)
         axes    = list(msg.axes)
 
+        if not self._prev_joy_time:
+            self._prev_joy_time = RclTime.from_msg(msg.header.stamp)
         if not self._prev_buttons:
             self._prev_buttons = list(buttons)
         if not self._prev_axes:
             self._prev_axes = list(axes)
+
+        joy_time = RclTime.from_msg(msg.header.stamp)
+        dt = float((joy_time - self._prev_joy_time).nanoseconds) * 1e-9
 
         # ── Button edge detection ───────────────────────────────────────────
         def btn_pressed(idx: int) -> bool:
@@ -496,44 +498,34 @@ class ImageAnnotatorNode(Node):
             else:
                 return cur < -DPAD_AXIS_THRESHOLD and prv >= -DPAD_AXIS_THRESHOLD
 
-        # ── Continuous stick movement ───────────────────────────────────────
-        ax_h = axes[AXIS_STICK_H] if len(axes) > AXIS_STICK_H else 0.0
-        ax_v = axes[AXIS_STICK_V] if len(axes) > AXIS_STICK_V else 0.0
+        if self._layer_to_row is not None and self._img_height:
+            # ── Continuous stick movement ───────────────────────────────────────
+            ax_h = axes[AXIS_STICK_H] if len(axes) > AXIS_STICK_H else 0.0
+            ax_v = axes[AXIS_STICK_V] if len(axes) > AXIS_STICK_V else 0.0
 
-        if abs(ax_h) < STICK_DEADZONE:
-            ax_h = 0.0
-        if abs(ax_v) < STICK_DEADZONE:
-            ax_v = 0.0
+            if abs(ax_h) < STICK_DEADZONE:
+                ax_h = 0.0
+            if abs(ax_v) < STICK_DEADZONE:
+                ax_v = 0.0
 
-        if ax_h != 0.0 and self._num_cols > 0:
-            self._col_accum += -ax_h * self._cursor_speed
-            col_delta        = int(self._col_accum)
-            self._col_accum -= col_delta
-            if col_delta != 0:
-                self._cursor_col = (self._cursor_col + col_delta) % self._num_cols
+            self._cursor_x += -ax_h * dt * self._cursor_speed
+            self._cursor_y += ax_v * dt * self._cursor_speed
 
-        if ax_v != 0.0:
-            # CURSOR_INVERT_V flips so stick-up moves toward the top of the
-            # displayed image. Adjust if still inverted on your setup.
-            v_sign = 1 if CURSOR_INVERT_V else -1
-            self._step_layer(v_sign if ax_v > 0.0 else -v_sign)
+            ROW_INCREMENT = self._img_height / self._grid_rows
+            if dpad_pressed(AXIS_DPAD_H, True):
+                self._cursor_x -= 1
+            if dpad_pressed(AXIS_DPAD_H, False):
+                self._cursor_x += 1
+            if dpad_pressed(AXIS_DPAD_V, True):
+                self._cursor_y += ROW_INCREMENT
+            if dpad_pressed(AXIS_DPAD_V, False):
+                self._cursor_y -= ROW_INCREMENT
 
-        # ── D-pad: single-pixel steps ───────────────────────────────────────
-        # Axis 6: left = +1, right = -1 (typical xpad). Left → col - 1 (moves
-        # left in azimuth). Adjust AXIS_DPAD_H polarity if inverted on your
-        # driver.
-        if dpad_pressed(AXIS_DPAD_H, positive=True) and self._num_cols > 0:
-            self._cursor_col = (self._cursor_col - 1) % self._num_cols
-        elif dpad_pressed(AXIS_DPAD_H, positive=False) and self._num_cols > 0:
-            self._cursor_col = (self._cursor_col + 1) % self._num_cols
+            self._cursor_x = self._cursor_x % self._img_width
+            self._cursor_y = max(0, min(self._cursor_y, self._img_height - 1))
 
-        # Axis 7: up = +1, down = -1. Uses the same vertical inversion as the
-        # stick so the d-pad and stick feel consistent.
-        v_sign = 1 if CURSOR_INVERT_V else -1
-        if dpad_pressed(AXIS_DPAD_V, positive=True):
-            self._step_layer(v_sign)
-        elif dpad_pressed(AXIS_DPAD_V, positive=False):
-            self._step_layer(-v_sign)
+            self._cursor_col = math.floor(self._cursor_x)
+            self._cursor_layer = math.floor(self._cursor_y / ROW_INCREMENT)
 
         # ── Button actions ──────────────────────────────────────────────────
         if btn_pressed(BTN_SELECT):
@@ -551,8 +543,9 @@ class ImageAnnotatorNode(Node):
             self._write_scan_to_ledger(self._scan_idx, skipped=False)
             self.get_logger().info(f"Force-saved scan {self._scan_idx + 1}.")
 
-        self._prev_buttons = buttons
-        self._prev_axes    = axes
+        self._prev_joy_time = joy_time
+        self._prev_buttons  = buttons
+        self._prev_axes     = axes
 
     def _step_layer(self, direction: int) -> None:
         self._cursor_layer = max(0, min(self._grid_rows - 1, self._cursor_layer + direction))
@@ -781,7 +774,8 @@ class ImageAnnotatorNode(Node):
         marker.pose.orientation.w = 1.0
         d = MARKER_RADIUS_M * 2.0
         marker.scale.x = marker.scale.y = marker.scale.z = d
-        marker.color.r, marker.color.g, marker.color.b, marker.color.a = MARKER_SELECTED_COLOR if ((cur_layer, cur_col) in self._selected) else MARKER_COLOR
+        marker.color.r, marker.color.g, marker.color.b, marker.color.a = (
+            MARKER_SELECTED_COLOR if ((cur_layer, cur_col) in self._selected) else MARKER_COLOR)
         self._marker_pub.publish(marker)
 
     def _publish_cloud(self, stamp) -> None:
