@@ -31,8 +31,6 @@
                 41.890844
             ],
             "grid_cols": 360,
-            "fov_up_deg": 41.891,
-            "fov_down_deg": 22.401,
             "azimuth_offset_deg": 0.0,
             "cursor_speed": 50,
             "ledger_path": "range_annotations_ledger.jsonl",

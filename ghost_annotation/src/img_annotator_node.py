@@ -107,7 +107,7 @@ CURSOR_SPEED_MAX     = 100
 
 AXIS_STICK_H  = 0   # left-stick horizontal (left = negative)
 AXIS_STICK_V  = 1   # left-stick vertical   (up = positive on most drivers)
-STICK_DEADZONE = 0.15
+STICK_DEADZONE = 0.05
 
 # D-pad axes (typical Linux xpad / joy_node mapping).
 # Each d-pad press moves the cursor exactly one pixel.
@@ -116,6 +116,10 @@ STICK_DEADZONE = 0.15
 AXIS_DPAD_H = 6
 AXIS_DPAD_V = 7
 DPAD_AXIS_THRESHOLD = 0.5   # axis magnitude needed to register a press
+DPAD_HOLD_THRESHOLD = 0.5
+
+AXIS_TRIGGER_UP = 5
+AXIS_TRIGGER_DOWN = 2
 
 # Set True if the image appears vertically flipped relative to stick input.
 # This inverts the vertical direction for both the stick and the d-pad.
@@ -125,14 +129,17 @@ CURSOR_INVERT_V = True
 # 3D point cloud (R, G, B, 0-255).
 COLOR_DEFAULT_CLOUD = (175, 175, 175)
 COLOR_CURSOR_CLOUD  = (0,   220, 220)   # cyan
-COLOR_SELECT_CLOUD  = (255, 30,  30)   # amber
+COLOR_SELECT_CLOUD  = (255, 30,  30)    # red
 
 # Image annotation markers (R, G, B, 0-255).
 COLOR_CURSOR_IMG = (0,   220, 220)      # cyan
-COLOR_SELECT_IMG = (255, 30,  30)      # amber
+COLOR_SELECT_IMG = (255, 30,  30)       # red
+COLOR_CURSEL_IMG = (220, 220, 30)
 
 # 3D sphere marker for cursor point.
 MARKER_RADIUS_M = 0.045
+MARKER_RADIUS_MIN_M = 0.005
+MARKER_RADIUS_MAX_M = 0.5
 MARKER_COLOR    = (0.0, 1.0, 1.0, 0.9)  # (r, g, b, a) 0-1
 MARKER_SELECTED_COLOR = (1.0, 0.1, 0.1, 0.9)
 
@@ -311,20 +318,22 @@ class ImageAnnotatorNode(Node):
         self._img_height:    int = 0
         self._img_width:     int = 0
 
-        self._selected:     set[tuple[int, int]] = set()
-        self._cursor_x:     float = 0
-        self._cursor_y:     float = 0
-        self._cursor_layer: int = 0
-        self._cursor_col:   int = 0
-        self._col_accum:    float = 0.0
+        self._selected:      set[tuple[int, int]] = set()
+        self._cursor_x:      float = 0
+        self._cursor_y:      float = 0
+        self._cursor_layer:  int = 0
+        self._cursor_col:    int = 0
+        self._col_accum:     float = 0.0
+        self._pt_cursor_rad: float = MARKER_RADIUS_M
 
         self._scan_idx = 0
         self._load_scan(self._scan_idx)
 
         # Input edge-detection state.
-        self._prev_joy_time: RclTime    = None
-        self._prev_buttons: list[int]   = []
-        self._prev_axes:    list[float] = []
+        self._prev_joy_time: RclTime            = None
+        self._prev_buttons: list[int]           = []
+        self._prev_axes:    list[float]         = []
+        self._dpad_hold_times: list[RclTime]    = []
 
         # ── QoS ────────────────────────────────────────────────────────────
         qos = QoSProfile(
@@ -469,13 +478,16 @@ class ImageAnnotatorNode(Node):
 
         if not self._prev_joy_time:
             self._prev_joy_time = RclTime.from_msg(msg.header.stamp)
+
+        joy_time = RclTime.from_msg(msg.header.stamp)
+        dt = float((joy_time - self._prev_joy_time).nanoseconds) * 1e-9
+
         if not self._prev_buttons:
             self._prev_buttons = list(buttons)
         if not self._prev_axes:
             self._prev_axes = list(axes)
-
-        joy_time = RclTime.from_msg(msg.header.stamp)
-        dt = float((joy_time - self._prev_joy_time).nanoseconds) * 1e-9
+        if not self._dpad_hold_times:
+            self._dpad_hold_times = [joy_time] * 4
 
         # ── Button edge detection ───────────────────────────────────────────
         def btn_pressed(idx: int) -> bool:
@@ -485,6 +497,11 @@ class ImageAnnotatorNode(Node):
                 and buttons[idx] == 1
                 and self._prev_buttons[idx] == 0
             )
+
+        def dpad_value(axis_idx: int, positive: bool) -> bool:
+            if axis_idx < len(axes):
+                return (axes[axis_idx] * (1 if positive else -1)) > DPAD_AXIS_THRESHOLD
+            return False
 
         # ── D-pad edge detection (axes that go 0 -> ±1 on press) ───────────
         def dpad_pressed(axis_idx: int, positive: bool) -> bool:
@@ -512,20 +529,32 @@ class ImageAnnotatorNode(Node):
             self._cursor_y += ax_v * dt * self._cursor_speed
 
             ROW_INCREMENT = self._img_height / self._grid_rows
-            if dpad_pressed(AXIS_DPAD_H, True):
-                self._cursor_x -= 1
-            if dpad_pressed(AXIS_DPAD_H, False):
-                self._cursor_x += 1
-            if dpad_pressed(AXIS_DPAD_V, True):
-                self._cursor_y += ROW_INCREMENT
-            if dpad_pressed(AXIS_DPAD_V, False):
-                self._cursor_y -= ROW_INCREMENT
+            DPAD_CONSTANTS = [
+                (AXIS_DPAD_H, True,  (-1,  0),             (-0.5,  0)),
+                (AXIS_DPAD_H, False, (+1,  0),             (+0.5,  0)),
+                (AXIS_DPAD_V, True,  ( 0, +ROW_INCREMENT), ( 0, +0.5)),
+                (AXIS_DPAD_V, False, ( 0, -ROW_INCREMENT), ( 0, -0.5))
+            ]
+
+            for i, D in enumerate(DPAD_CONSTANTS):
+                if not dpad_value(D[0], D[1]):
+                    self._dpad_hold_times[i] = joy_time
+                if dpad_pressed(D[0], D[1]):
+                    self._cursor_x += D[2][0]
+                    self._cursor_y += D[2][1]
+                if float((joy_time - self._dpad_hold_times[i]).nanoseconds) > (DPAD_HOLD_THRESHOLD * 1e9):
+                    self._cursor_x += D[3][0] * dt * self._cursor_speed
+                    self._cursor_y += D[3][1] * dt * self._cursor_speed
 
             self._cursor_x = self._cursor_x % self._img_width
             self._cursor_y = max(0, min(self._cursor_y, self._img_height - 1))
 
             self._cursor_col = math.floor(self._cursor_x)
             self._cursor_layer = math.floor(self._cursor_y / ROW_INCREMENT)
+
+        if len(axes) > max(AXIS_TRIGGER_UP, AXIS_TRIGGER_DOWN):
+            self._pt_cursor_rad += (axes[AXIS_TRIGGER_DOWN] - axes[AXIS_TRIGGER_UP]) / 2 * 0.1 * dt
+            self._pt_cursor_rad = max(MARKER_RADIUS_MIN_M, min(self._pt_cursor_rad, MARKER_RADIUS_MAX_M))
 
         # ── Button actions ──────────────────────────────────────────────────
         if btn_pressed(BTN_SELECT):
@@ -730,7 +759,11 @@ class ImageAnnotatorNode(Node):
                 add_point(sel_col, sel_layer, COLOR_SELECT_IMG)
 
         if 0 <= self._cursor_layer < self._grid_rows:
-            add_point(self._cursor_col, self._cursor_layer, COLOR_CURSOR_IMG)
+            add_point(
+                self._cursor_col,
+                self._cursor_layer,
+                COLOR_CURSEL_IMG if ((self._cursor_layer, self._cursor_col) in self._selected) else COLOR_CURSOR_IMG
+            )
 
         self._img_annot_pub.publish(marker)
 
@@ -772,7 +805,7 @@ class ImageAnnotatorNode(Node):
         marker.pose.position.y    = float(y)
         marker.pose.position.z    = float(z)
         marker.pose.orientation.w = 1.0
-        d = MARKER_RADIUS_M * 2.0
+        d = self._pt_cursor_rad * 2.0
         marker.scale.x = marker.scale.y = marker.scale.z = d
         marker.color.r, marker.color.g, marker.color.b, marker.color.a = (
             MARKER_SELECTED_COLOR if ((cur_layer, cur_col) in self._selected) else MARKER_COLOR)
