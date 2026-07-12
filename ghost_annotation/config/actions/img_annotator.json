@@ -32,7 +32,7 @@
             ],
             "grid_cols": 360,
             "azimuth_offset_deg": 0.0,
-            "cursor_speed": 50,
+            "cursor_speed": 100,
             "ledger_path": "range_annotations_ledger.jsonl",
             "reviewed_scans_path": "range_annotations_reviewed.jsonl",
             "skip_jump_size": 100

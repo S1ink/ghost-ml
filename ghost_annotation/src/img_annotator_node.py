@@ -64,6 +64,7 @@ from geometry_msgs.msg import Point as GeoPoint
 import rosbag2_py
 from rclpy.serialization import deserialize_message
 from grid_utils import compute_polar_grid, build_range_image
+from joy_state import XboxController as Xbox, JoyState, JoyButton, JoyAxis, JoyPov
 
 # ─────────────────────────────────────────────────────────────────────────────
 # USER-EDITABLE CONSTANTS
@@ -81,11 +82,6 @@ IMAGE_ANNOTATION_TOPIC = "/annotator/image_annotations"
 # 3D sphere marker showing which point the image cursor is currently on.
 # Add this topic to your Foxglove 3D panel as a Marker display.
 CURSOR_MARKER_TOPIC = "/annotator/cursor_marker"
-
-# Lidar geometry -- used for image aspect-ratio calculation only.
-# FOV_UP_DEG + FOV_DOWN_DEG = total vertical FOV.
-FOV_UP_DEG   = 41.891   # highest layer elevation (degrees above horizontal)
-FOV_DOWN_DEG = 22.401   # lowest layer elevation magnitude (degrees below)
 
 # Per-layer elevation angles for nearest-angle binning. Replace placeholder
 # with output from calibrate_layer_elevations.py (run against a raw bag that
@@ -107,7 +103,7 @@ CURSOR_SPEED_MAX     = 100
 
 AXIS_STICK_H  = 0   # left-stick horizontal (left = negative)
 AXIS_STICK_V  = 1   # left-stick vertical   (up = positive on most drivers)
-STICK_DEADZONE = 0.05
+STICK_DEADZONE = 0.1
 
 # D-pad axes (typical Linux xpad / joy_node mapping).
 # Each d-pad press moves the cursor exactly one pixel.
@@ -116,7 +112,7 @@ STICK_DEADZONE = 0.05
 AXIS_DPAD_H = 6
 AXIS_DPAD_V = 7
 DPAD_AXIS_THRESHOLD = 0.5   # axis magnitude needed to register a press
-DPAD_HOLD_THRESHOLD = 0.5
+DPAD_HOLD_THRESHOLD = 0.3
 
 AXIS_TRIGGER_UP = 5
 AXIS_TRIGGER_DOWN = 2
@@ -141,9 +137,10 @@ MARKER_RADIUS_M = 0.045
 MARKER_RADIUS_MIN_M = 0.005
 MARKER_RADIUS_MAX_M = 0.5
 MARKER_COLOR    = (0.0, 1.0, 1.0, 0.9)  # (r, g, b, a) 0-1
-MARKER_SELECTED_COLOR = (1.0, 0.1, 0.1, 0.9)
+MARKER_SELECTED_COLOR = (0.9, 0.9, 0.1, 0.9)
 
-REPUBLISH_HZ = 10.0
+REPUBLISH_HZ = 10.0          # heartbeat timer rate (Hz)
+JOY_REPUBLISH_HZ = 30.0     # max rate at which joystick input triggers a publish (Hz)
 
 LEDGER_PATH         = "range_annotations_ledger.jsonl"
 REVIEWED_SCANS_PATH = "range_annotations_reviewed.jsonl"
@@ -250,6 +247,50 @@ def prompt_bag_path(default_path=None):
 
 class ImageAnnotatorNode(Node):
 
+    class JoyControls:
+        def __init__(self):
+            self.joy_state = JoyState()
+
+            self.cursor_h_axis = JoyAxis(self.joy_state, Xbox.AXIS_LEFT_X)
+            self.cursor_v_axis = JoyAxis(self.joy_state, Xbox.AXIS_LEFT_Y)
+            self.cursor_speed_axis = JoyAxis(self.joy_state, Xbox.AXIS_LEFT_TRIGGER)
+            self.marker_size_axis = JoyAxis(self.joy_state, Xbox.AXIS_RIGHT_TRIGGER)
+
+            self.grad_base_axis = JoyAxis(self.joy_state, Xbox.AXIS_RIGHT_X)
+            self.grad_range_axis = JoyAxis(self.joy_state, Xbox.AXIS_RIGHT_Y)
+
+            self.dpad_h_plus = JoyPov(
+                self.joy_state,
+                Xbox.AXIS_DPAD_HORIZONTAL,
+                Xbox.DPAD_RIGHT_VAL)
+            self.dpad_h_minus = JoyPov(
+                self.joy_state,
+                Xbox.AXIS_DPAD_HORIZONTAL,
+                Xbox.DPAD_LEFT_VAL)
+            self.dpad_v_plus = JoyPov(
+                self.joy_state,
+                Xbox.AXIS_DPAD_VERTICAL,
+                Xbox.DPAD_UP_VAL)
+            self.dpad_v_minus = JoyPov(
+                self.joy_state,
+                Xbox.AXIS_DPAD_VERTICAL,
+                Xbox.DPAD_DOWN_VAL)
+
+            self.select_btn = JoyButton(self.joy_state, Xbox.BUTTON_A)
+            self.select_btn2 = JoyButton(self.joy_state, Xbox.BUTTON_LEFT_STICK)
+            self.reset_grad_btn = JoyButton(self.joy_state, Xbox.BUTTON_RIGHT_STICK)
+            self.invert_btn = JoyButton(self.joy_state, Xbox.BUTTON_Y)
+            self.skip_fwd_btn = JoyButton(self.joy_state, Xbox.BUTTON_LEFT_BUMPER)
+            self.prev_scan_btn = JoyButton(self.joy_state, Xbox.BUTTON_RIGHT_BUMPER)
+            self.next_scan_btn = JoyButton(self.joy_state, Xbox.BUTTON_B)
+            self.clear_btn = JoyButton(self.joy_state, Xbox.BUTTON_X)
+            self.save_btn = JoyButton(self.joy_state, Xbox.BUTTON_RIGHT_CENTER)
+            self.skip_back_btn = JoyButton(self.joy_state, Xbox.BUTTON_LEFT_CENTER)
+
+        def update(self, joy: Joy):
+            self.joy_state.update(joy)
+
+
     def __init__(self, bag_path: str = None):
         super().__init__("img_annotator")
 
@@ -330,10 +371,19 @@ class ImageAnnotatorNode(Node):
         self._load_scan(self._scan_idx)
 
         # Input edge-detection state.
-        self._prev_joy_time: RclTime            = None
-        self._prev_buttons: list[int]           = []
-        self._prev_axes:    list[float]         = []
-        self._dpad_hold_times: list[RclTime]    = []
+        # self._prev_joy_time: RclTime            = None
+        # self._prev_buttons: list[int]           = []
+        # self._prev_axes:    list[float]         = []
+
+        self._controls = ImageAnnotatorNode.JoyControls()
+        self._dpad_hold_times: list[RclTime] = []
+        self._grad_base: float = 0
+        self._grad_range: float = 2.5
+
+        # Tracks when outputs were last published (nanoseconds, ROS time).
+        # Used to rate-limit joy-driven republishes to JOY_REPUBLISH_HZ.
+        self._last_publish_ns: int = 0
+        self._joy_republish_min_ns: int = int(1e9 / JOY_REPUBLISH_HZ)
 
         # ── QoS ────────────────────────────────────────────────────────────
         qos = QoSProfile(
@@ -473,78 +523,46 @@ class ImageAnnotatorNode(Node):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _on_joy(self, msg: Joy) -> None:
-        buttons = list(msg.buttons)
-        axes    = list(msg.axes)
+        self._controls.update(msg)
 
-        if not self._prev_joy_time:
-            self._prev_joy_time = RclTime.from_msg(msg.header.stamp)
+        t = self._controls.joy_state.stamp
+        dt = self._controls.joy_state.dt
 
-        joy_time = RclTime.from_msg(msg.header.stamp)
-        dt = float((joy_time - self._prev_joy_time).nanoseconds) * 1e-9
-
-        if not self._prev_buttons:
-            self._prev_buttons = list(buttons)
-        if not self._prev_axes:
-            self._prev_axes = list(axes)
         if not self._dpad_hold_times:
-            self._dpad_hold_times = [joy_time] * 4
-
-        # ── Button edge detection ───────────────────────────────────────────
-        def btn_pressed(idx: int) -> bool:
-            return (
-                idx < len(buttons)
-                and idx < len(self._prev_buttons)
-                and buttons[idx] == 1
-                and self._prev_buttons[idx] == 0
-            )
-
-        def dpad_value(axis_idx: int, positive: bool) -> bool:
-            if axis_idx < len(axes):
-                return (axes[axis_idx] * (1 if positive else -1)) > DPAD_AXIS_THRESHOLD
-            return False
-
-        # ── D-pad edge detection (axes that go 0 -> ±1 on press) ───────────
-        def dpad_pressed(axis_idx: int, positive: bool) -> bool:
-            """True on the first tick an axis crosses the threshold."""
-            if axis_idx >= len(axes) or axis_idx >= len(self._prev_axes):
-                return False
-            cur = axes[axis_idx]
-            prv = self._prev_axes[axis_idx]
-            if positive:
-                return cur >  DPAD_AXIS_THRESHOLD and prv <=  DPAD_AXIS_THRESHOLD
-            else:
-                return cur < -DPAD_AXIS_THRESHOLD and prv >= -DPAD_AXIS_THRESHOLD
+            self._dpad_hold_times = [t] * 4
 
         if self._layer_to_row is not None and self._img_height:
-            # ── Continuous stick movement ───────────────────────────────────────
-            ax_h = axes[AXIS_STICK_H] if len(axes) > AXIS_STICK_H else 0.0
-            ax_v = axes[AXIS_STICK_V] if len(axes) > AXIS_STICK_V else 0.0
+            cursor_speed = (
+                self._cursor_speed *
+                (1 - self._controls.cursor_speed_axis.trigger_value())
+            )
 
-            if abs(ax_h) < STICK_DEADZONE:
-                ax_h = 0.0
-            if abs(ax_v) < STICK_DEADZONE:
-                ax_v = 0.0
-
-            self._cursor_x += -ax_h * dt * self._cursor_speed
-            self._cursor_y += ax_v * dt * self._cursor_speed
+            self._cursor_x -= (
+                self._controls.cursor_h_axis.deadzone_value(STICK_DEADZONE) *
+                dt * cursor_speed
+            )
+            self._cursor_y += (
+                self._controls.cursor_v_axis.deadzone_value(STICK_DEADZONE) *
+                dt * cursor_speed
+            )
 
             ROW_INCREMENT = self._img_height / self._grid_rows
-            DPAD_CONSTANTS = [
-                (AXIS_DPAD_H, True,  (-1,  0),             (-0.5,  0)),
-                (AXIS_DPAD_H, False, (+1,  0),             (+0.5,  0)),
-                (AXIS_DPAD_V, True,  ( 0, +ROW_INCREMENT), ( 0, +0.5)),
-                (AXIS_DPAD_V, False, ( 0, -ROW_INCREMENT), ( 0, -0.5))
+            DPAD_BUTTONS = [
+                (self._controls.dpad_h_minus, (-1,  0),             (-0.5,  0)),
+                (self._controls.dpad_h_plus,  (+1,  0),             (+0.5,  0)),
+                (self._controls.dpad_v_plus,  ( 0, +ROW_INCREMENT), ( 0, +0.5)),
+                (self._controls.dpad_v_minus, ( 0, -ROW_INCREMENT), ( 0, -0.5))
             ]
 
-            for i, D in enumerate(DPAD_CONSTANTS):
-                if not dpad_value(D[0], D[1]):
-                    self._dpad_hold_times[i] = joy_time
-                if dpad_pressed(D[0], D[1]):
-                    self._cursor_x += D[2][0]
-                    self._cursor_y += D[2][1]
-                if float((joy_time - self._dpad_hold_times[i]).nanoseconds) > (DPAD_HOLD_THRESHOLD * 1e9):
-                    self._cursor_x += D[3][0] * dt * self._cursor_speed
-                    self._cursor_y += D[3][1] * dt * self._cursor_speed
+            for i, D in enumerate(DPAD_BUTTONS):
+                if not D[0].raw_value():
+                    self._dpad_hold_times[i] = t
+                if D[0].was_pressed():
+                    self._cursor_x += D[1][0]
+                    self._cursor_y += D[1][1]
+                if (t - self._dpad_hold_times[i]) > DPAD_HOLD_THRESHOLD:
+                    self._cursor_x += D[2][0] * dt * cursor_speed
+                    self._cursor_y += D[2][1] * dt * cursor_speed
 
             self._cursor_x = self._cursor_x % self._img_width
             self._cursor_y = max(0, min(self._cursor_y, self._img_height - 1))
@@ -552,29 +570,51 @@ class ImageAnnotatorNode(Node):
             self._cursor_col = math.floor(self._cursor_x)
             self._cursor_layer = math.floor(self._cursor_y / ROW_INCREMENT)
 
-        if len(axes) > max(AXIS_TRIGGER_UP, AXIS_TRIGGER_DOWN):
-            self._pt_cursor_rad += (axes[AXIS_TRIGGER_DOWN] - axes[AXIS_TRIGGER_UP]) / 2 * 0.1 * dt
-            self._pt_cursor_rad = max(MARKER_RADIUS_MIN_M, min(self._pt_cursor_rad, MARKER_RADIUS_MAX_M))
+            self._pt_cursor_rad += (
+                self._controls.marker_size_axis.trigger_value() *
+                (-1 if self._controls.invert_btn.raw_value() else 1) *
+                (0.1 * dt)
+            )
+            self._pt_cursor_rad = max(
+                MARKER_RADIUS_MIN_M,
+                min(self._pt_cursor_rad, MARKER_RADIUS_MAX_M)
+            )
 
-        # ── Button actions ──────────────────────────────────────────────────
-        if btn_pressed(BTN_SELECT):
+            self._grad_base -= (
+                self._controls.grad_base_axis.deadzone_value(STICK_DEADZONE) * dt
+            )
+            self._grad_range += (
+                self._controls.grad_range_axis.deadzone_value(STICK_DEADZONE) * dt
+            )
+            self._grad_base = max(0, self._grad_base)
+            self._grad_range = max(1e-7, self._grad_range)
+
+        if self._controls.reset_grad_btn.was_pressed():
+            self._grad_base = 0
+            self._grad_range = 2.5
+
+        if (self._controls.select_btn.was_pressed() or
+                self._controls.select_btn2.was_pressed()):
             self._toggle_selection()
-        elif btn_pressed(BTN_CLEAR):
+        elif self._controls.clear_btn.was_pressed():
             self._clear_selections()
-        elif btn_pressed(BTN_NEXT):
+        elif self._controls.next_scan_btn.was_pressed():
             self._navigate_scan(1, skipped=False)
-        elif btn_pressed(BTN_PREV):
+        elif self._controls.prev_scan_btn.was_pressed():
             self._navigate_scan(-1, skipped=False)
-        elif btn_pressed(BTN_SKIP):
+        elif self._controls.skip_fwd_btn.was_pressed():
             self._navigate_scan(self._skip_jump_size, skipped=True)
-        elif btn_pressed(BTN_SAVE):
+        elif self._controls.skip_back_btn.was_pressed():
+            self._navigate_scan(-self._skip_jump_size, skipped=True)
+        elif self._controls.save_btn.was_pressed():
             self._save_current_scan_to_memory()
             self._write_scan_to_ledger(self._scan_idx, skipped=False)
             self.get_logger().info(f"Force-saved scan {self._scan_idx + 1}.")
 
-        self._prev_joy_time = joy_time
-        self._prev_buttons  = buttons
-        self._prev_axes     = axes
+        # Re-publish outputs immediately if the rate window allows.
+        now_ns = self.get_clock().now().nanoseconds
+        if now_ns - self._last_publish_ns >= self._joy_republish_min_ns:
+            self._do_republish()
 
     def _step_layer(self, direction: int) -> None:
         self._cursor_layer = max(0, min(self._grid_rows - 1, self._cursor_layer + direction))
@@ -687,14 +727,23 @@ class ImageAnnotatorNode(Node):
     # Publishing
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _republish(self) -> None:
+    def _do_republish(self) -> None:
+        """Publish all outputs and record the timestamp. Called both by the
+        heartbeat timer and directly from _on_joy (rate-limited)."""
         if self._range_grid is None:
             return
-        stamp = self.get_clock().now().to_msg()
+        now = self.get_clock().now()
+        self._last_publish_ns = now.nanoseconds
+        stamp = now.to_msg()
         self._publish_cloud(stamp)
         self._publish_image(stamp)
         self._publish_image_annotations(stamp)
         self._publish_cursor_3d_marker(stamp)
+
+    def _republish(self) -> None:
+        """Heartbeat timer callback — fires at REPUBLISH_HZ to keep displays
+        fresh even when no joystick input arrives."""
+        self._do_republish()
 
     def _publish_image(self, stamp) -> None:
         if self._layer_to_row is None:
@@ -709,7 +758,9 @@ class ImageAnnotatorNode(Node):
             px_row = int(self._layer_to_row[layer])
             if 0 <= px_row < H:
                 row_data = rg[layer, :]
-                img[px_row, :] = np.where(np.isfinite(row_data), row_data, np.nan)
+                norm_row_data = np.clip(
+                    (row_data - self._grad_base) / self._grad_range, 0, 1)
+                img[px_row, :] = np.where(np.isfinite(row_data), norm_row_data, np.nan)
 
         img_msg = Image()
         img_msg.header.stamp    = stamp
@@ -739,13 +790,13 @@ class ImageAnnotatorNode(Node):
         marker.id     = 0
         marker.type   = ImageMarker.POINTS
         marker.action = ImageMarker.ADD
-        marker.scale  = 0.5   # single pixel
+        marker.scale  = 0.25   # single pixel
 
-        def add_point(col: int, layer: int, color: tuple):
+        def add_point(col: int, row: int, color: tuple):
             r, g, b = color
             marker.points.append(GeoPoint(
-                x=float(col) + 0.5,
-                y=float(self._layer_to_row[layer]) + 0.5,
+                x=float(col) + 0.25,
+                y=float(row) + 0.25,
                 z=0.0,
             ))
             marker.outline_colors.append(
@@ -756,14 +807,29 @@ class ImageAnnotatorNode(Node):
         # that shares the same cell).
         for (sel_layer, sel_col) in self._selected:
             if 0 <= sel_layer < self._grid_rows:
-                add_point(sel_col, sel_layer, COLOR_SELECT_IMG)
+                sel_row = self._layer_to_row[sel_layer]
+                add_point(sel_col,       sel_row,       COLOR_SELECT_IMG)
+                add_point(sel_col,       sel_row + 0.5, COLOR_SELECT_IMG)
+                add_point(sel_col + 0.5, sel_row,       COLOR_SELECT_IMG)
+                add_point(sel_col + 0.5, sel_row + 0.5, COLOR_SELECT_IMG)
 
         if 0 <= self._cursor_layer < self._grid_rows:
-            add_point(
-                self._cursor_col,
-                self._cursor_layer,
-                COLOR_CURSEL_IMG if ((self._cursor_layer, self._cursor_col) in self._selected) else COLOR_CURSOR_IMG
-            )
+            color = (COLOR_CURSEL_IMG
+                        if ((self._cursor_layer, self._cursor_col) in self._selected)
+                        else COLOR_CURSOR_IMG)
+            sel_row = self._layer_to_row[self._cursor_layer]
+            add_point(self._cursor_col - 0.5, sel_row - 0.5, color)
+            add_point(self._cursor_col - 0.5, sel_row,       color)
+            add_point(self._cursor_col - 0.5, sel_row + 0.5, color)
+            add_point(self._cursor_col - 0.5, sel_row + 1.0, color)
+            add_point(self._cursor_col,       sel_row - 0.5, color)
+            add_point(self._cursor_col + 0.5, sel_row - 0.5, color)
+            add_point(self._cursor_col + 1.0, sel_row - 0.5, color)
+            add_point(self._cursor_col,       sel_row + 1.0, color)
+            add_point(self._cursor_col + 0.5, sel_row + 1.0, color)
+            add_point(self._cursor_col + 1.0, sel_row,       color)
+            add_point(self._cursor_col + 1.0, sel_row + 0.5, color)
+            add_point(self._cursor_col + 1.0, sel_row + 1.0, color)
 
         self._img_annot_pub.publish(marker)
 
@@ -816,9 +882,30 @@ class ImageAnnotatorNode(Node):
         if xyz is None:
             return
 
-        N      = xyz.shape[0]
-        white  = pack_rgb_float(*COLOR_DEFAULT_CLOUD)
-        colors = np.full(N, white, dtype=np.float32)
+        N = xyz.shape[0]
+
+        # Default: grayscale from normalised range value using _grad_base / _grad_range.
+        # Each point lives at a (layer, col) cell; look up its range, normalise, and
+        # pack as an equal-channel RGB float.  Points with no valid range fall back to
+        # the flat default colour.
+        colors = np.full(N, pack_rgb_float(*COLOR_DEFAULT_CLOUD), dtype=np.float32)
+        if self._point_idx_img is not None and self._range_grid is not None:
+            # grad_range = self._grad_range if self._grad_range != 0 else 1.0
+
+            # Flatten the grid arrays so we can process all cells at once.
+            flat_idx  = self._point_idx_img[:self._grid_rows, :self._num_cols].ravel().astype(np.int32)
+            flat_rng  = self._range_grid[:self._grid_rows, :self._num_cols].ravel()
+
+            # Only consider cells that have a valid point index and a finite range.
+            valid = (flat_idx >= 0) & np.isfinite(flat_rng)
+            if valid.any():
+                v = np.clip((flat_rng[valid] - self._grad_base) / self._grad_range, 0.0, 1.0)
+                g = (v * 255).astype(np.uint32)
+                # Pack as 0x00RRGGBB where R == G == B == g.
+                packed = (g << 16) | (g << 8) | g
+                gray_floats = packed.view(np.float32) if packed.dtype == np.uint32 else \
+                              packed.astype(np.uint32).view(np.float32)
+                colors[flat_idx[valid]] = gray_floats
 
         sel_color = pack_rgb_float(*COLOR_SELECT_CLOUD)
         for (sel_layer, sel_col) in self._selected:
