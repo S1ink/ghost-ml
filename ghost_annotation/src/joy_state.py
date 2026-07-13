@@ -39,6 +39,7 @@ class JoyState:
 
     prev_buttons: list[int] = field(default_factory=list)
     buttons: list[int] = field(default_factory=list)
+    button_held_refs: list[float] = field(default_factory=list)
 
     dt: float = 0.0
     stamp: float = 0.0
@@ -62,6 +63,13 @@ class JoyState:
             self.dt = t - self.stamp
 
         self.stamp = t
+
+        for i, b in enumerate(self.buttons):
+            if i < len(self.button_held_refs):
+                if not bool(b):
+                    self.button_held_refs[i] = t
+            else:
+                self.button_held_refs.append(t)
 
     def update_disconnected(self) -> None:
         self.continuous = False
@@ -105,6 +113,12 @@ class JoyState:
             self.is_button_continuous(idx)
             and self.prev_buttons[idx]
             and not self.buttons[idx]
+        )
+
+    def get_button_held(self, idx: int, thresh: float) -> bool:
+        return (
+            self.has_button_idx(idx) and
+            (self.stamp - self.button_held_refs[idx]) >= thresh
         )
 
     # ------------------------------------------------------------------
@@ -180,6 +194,9 @@ class JoyButton:
 
     def was_released(self, joy: Optional[JoyState] = None) -> bool:
         return self._joy(joy).get_button_released(self.idx)
+
+    def was_held(self, thresh: float, joy: Optional[JoyState] = None) -> bool:
+        return self._joy(joy).get_button_held(self.idx, thresh)
 
 
 @dataclass

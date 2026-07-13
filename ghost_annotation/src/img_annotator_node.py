@@ -17,30 +17,19 @@ Joystick-driven offline annotation tool that:
   5. Pressing A selects / deselects the current cell. B advances to the next
      scan, and RB goes back.
   6. Selections are stored in memory and written to a JSONL ledger on
-     navigation (one line per selected point, aligned with the previous
-     annotator tool format). Existing selections are reloaded on startup.
+     navigation (one snapshot record per scan save, last-write-wins per scan).
+     Existing selections are reloaded on startup.
 
-Published image is 32FC1 float (raw range in metres, NaN for empty cells).
-Image overlays (cursor crosshair, selected-point dots) are published as a
-single visualization_msgs/ImageMarker POINTS message so the raw float image
-remains untouched. In Foxglove, point the Image panel's "Annotations" setting
-at IMAGE_ANNOTATION_TOPIC.
+Published image is 32FC1 float (normalised range, NaN for empty cells).
+Image overlays (cursor, selected-point dots) are published as a single
+visualization_msgs/ImageMarker POINTS message so the raw float image
+remains untouched. In Foxglove, point the Image panel's "Annotations"
+setting at IMAGE_ANNOTATION_TOPIC.
 
-Controller bindings (standard xpad / joy_node Xbox layout):
-  Left stick H/V (axes 0, 1) -- move cursor (continuous, speed-scaled)
-  D-pad H/V (axes 6, 7)      -- move cursor one pixel at a time
-  A  (button 0)              -- select / deselect cell under cursor
-  B  (button 1)              -- save current selections and advance to next scan
-  X  (button 2)              -- clear selections for the current scan
-  Y  (button 3)              -- (reserved / unused)
-  LB (button 4)              -- fast-forward (skip SKIP_JUMP_SIZE scans)
-  RB (button 5)              -- save current selections and go back one scan
-  Start (button 7)           -- force-save current scan selections to ledger
-
-Point cloud coloring:
-  Default:  white
-  Cursor:   cyan
-  Selected: amber
+Ledger format: one JSONL line per scan save.
+  {"bag": "...", "scan_stamp_ns": 123, "session": "...",
+   "skipped": false, "selections": [[ring, col, range_m], ...]}
+Last record per scan_stamp_ns is authoritative (handles removals correctly).
 """
 
 from __future__ import annotations
@@ -74,86 +63,51 @@ INPUT_CLOUD_TOPIC  = "/multiscan/lidar_scan"
 OUTPUT_CLOUD_TOPIC = "/annotator/range_cloud"
 OUTPUT_IMAGE_TOPIC = "/annotator/range_image"
 
-# Image annotation overlays (cursor dot + selection dots) are published here
-# as a single visualization_msgs/ImageMarker POINTS message. In Foxglove,
-# point your Image panel's "Annotations" setting at this topic.
 IMAGE_ANNOTATION_TOPIC = "/annotator/image_annotations"
-
-# 3D sphere marker showing which point the image cursor is currently on.
-# Add this topic to your Foxglove 3D panel as a Marker display.
-CURSOR_MARKER_TOPIC = "/annotator/cursor_marker"
+CURSOR_MARKER_TOPIC    = "/annotator/cursor_marker"
 
 # Per-layer elevation angles for nearest-angle binning. Replace placeholder
-# with output from calibrate_layer_elevations.py (run against a raw bag that
-# still has ring data). Order doesn't matter; sorted internally.
+# with output from calibrate_layer_elevations.py.
 LAYER_ELEVATIONS_DEG = [
     42.2, 35.0, 29.0, 24.5, 19.0, 14.8, 10.0,
     5.5, 1.0, -4.0, -9.5, -14.0, -18.5, -22.2,
 ]  # <-- PLACEHOLDER. Replace with calibrate_layer_elevations.py output.
 GRID_COLS = 360
-
 AZIMUTH_OFFSET_DEG = 0.0
 
 # ── Joystick tuning ───────────────────────────────────────────────────────────
-# Continuous stick movement speed. 1 = one column per joy tick at full
-# deflection. Keep this low -- the d-pad handles precise single-step movement.
-CURSOR_SPEED_DEFAULT = 1
+CURSOR_SPEED_DEFAULT = 50
 CURSOR_SPEED_MIN     = 1
 CURSOR_SPEED_MAX     = 100
 
-AXIS_STICK_H  = 0   # left-stick horizontal (left = negative)
-AXIS_STICK_V  = 1   # left-stick vertical   (up = positive on most drivers)
 STICK_DEADZONE = 0.1
-
-# D-pad axes (typical Linux xpad / joy_node mapping).
-# Each d-pad press moves the cursor exactly one pixel.
-# Axis 6 horizontal: left = +1.0, right = -1.0
-# Axis 7 vertical:   up   = +1.0, down  = -1.0
-AXIS_DPAD_H = 6
-AXIS_DPAD_V = 7
-DPAD_AXIS_THRESHOLD = 0.5   # axis magnitude needed to register a press
-DPAD_HOLD_THRESHOLD = 0.3
-
-AXIS_TRIGGER_UP = 5
-AXIS_TRIGGER_DOWN = 2
-
-# Set True if the image appears vertically flipped relative to stick input.
-# This inverts the vertical direction for both the stick and the d-pad.
-CURSOR_INVERT_V = True
+BUTTON_HELD_THRESH = 0.25
 
 # ── Visual colours ─────────────────────────────────────────────────────────────
-# 3D point cloud (R, G, B, 0-255).
-COLOR_DEFAULT_CLOUD = (175, 175, 175)
-COLOR_CURSOR_CLOUD  = (0,   220, 220)   # cyan
-COLOR_SELECT_CLOUD  = (255, 30,  30)    # red
+PC_DEFAULT_COLOR  = (175, 175, 175)
+PC_SELECTED_COLOR = (255, 30,  30)
+PC_CURSOR_COLOR   = (30,  220, 100)
 
-# Image annotation markers (R, G, B, 0-255).
-COLOR_CURSOR_IMG = (0,   220, 220)      # cyan
-COLOR_SELECT_IMG = (255, 30,  30)       # red
-COLOR_CURSEL_IMG = (220, 220, 30)
+IMG_SELECTED_COLOR      = (1.0, 0.1, 0.1, 1.0)
+IMG_CURSOR_COLOR        = (0.1, 0.9, 0.4, 1.0)
+IMG_CURSOR_SELECT_COLOR = (0.9, 0.9, 0.1, 1.0)
 
-# 3D sphere marker for cursor point.
-MARKER_RADIUS_M = 0.045
-MARKER_RADIUS_MIN_M = 0.005
-MARKER_RADIUS_MAX_M = 0.5
-MARKER_COLOR    = (0.0, 1.0, 1.0, 0.9)  # (r, g, b, a) 0-1
-MARKER_SELECTED_COLOR = (0.9, 0.9, 0.1, 0.9)
+PC_CURSOR_MARKER_RAD_M        = 0.045
+PC_CURSOR_MARKER_RAD_MIN_M    = 0.005
+PC_CURSOR_MARKER_RAD_MAX_M    = 0.5
+PC_CURSOR_MARKER_COLOR        = (0.1, 0.9, 0.4, 1.0)
+PC_CURSOR_SELECT_MARKER_COLOR = (0.9, 0.9, 0.1, 1.0)
 
-REPUBLISH_HZ = 10.0          # heartbeat timer rate (Hz)
-JOY_REPUBLISH_HZ = 30.0     # max rate at which joystick input triggers a publish (Hz)
+REPUBLISH_HZ      = 10.0
+JOY_REPUBLISH_HZ  = 30.0
 
-LEDGER_PATH         = "range_annotations_ledger.jsonl"
-REVIEWED_SCANS_PATH = "range_annotations_reviewed.jsonl"
-SKIP_JUMP_SIZE      = 100
+# Single ledger file: one snapshot record per scan save.
+# REVIEWED_SCANS_PATH is no longer needed; skipped/confirmed counts are
+# embedded in each ledger record and derivable by downstream scripts.
+LEDGER_PATH = "range_annotations_ledger.jsonl"
+
+SKIP_JUMP_SIZE = 100
 SESSION_ID = datetime.now(timezone.utc).strftime("session_%Y%m%d_%H%M%S")
-
-# Controller buttons.
-BTN_SELECT = 0   # A
-BTN_NEXT   = 1   # B
-BTN_CLEAR  = 2   # X
-BTN_SKIP   = 4   # LB
-BTN_PREV   = 5   # RB
-BTN_SAVE   = 7   # Start
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -171,16 +125,13 @@ def build_layer_row_map(
 ) -> tuple[np.ndarray, int]:
     """
     Places each layer at a pixel row proportional to its actual elevation
-    angle within the sensor FOV, rather than at uniform intervals.
-    Image height is set by the hFOV/vFOV aspect ratio (360 deg / total vFOV).
-    Row 0 = top of image = highest elevation.
+    angle within the sensor FOV. Row 0 = top of image = highest elevation.
+    Image height is set by the hFOV/vFOV aspect ratio.
     """
-    # Sort descending so index 0 = highest elevation = row 0 (top).
-    sorted_layers = np.sort(layer_elevations_rad)[::-1]
-
-    total_fov = sorted_layers[0] - sorted_layers[-1]
-    aspect_ratio  = math.pi * 2 / total_fov
-    img_height    = round(img_width / aspect_ratio)
+    sorted_layers = np.sort(layer_elevations_rad)[::-1]  # descending: row 0 = top
+    total_fov    = sorted_layers[0] - sorted_layers[-1]
+    aspect_ratio = math.pi * 2 / total_fov
+    img_height   = round(img_width / aspect_ratio)
 
     el_max  = sorted_layers[0]
     el_min  = sorted_layers[-1]
@@ -251,41 +202,29 @@ class ImageAnnotatorNode(Node):
         def __init__(self):
             self.joy_state = JoyState()
 
-            self.cursor_h_axis = JoyAxis(self.joy_state, Xbox.AXIS_LEFT_X)
-            self.cursor_v_axis = JoyAxis(self.joy_state, Xbox.AXIS_LEFT_Y)
-            self.cursor_speed_axis = JoyAxis(self.joy_state, Xbox.AXIS_LEFT_TRIGGER)
-            self.marker_size_axis = JoyAxis(self.joy_state, Xbox.AXIS_RIGHT_TRIGGER)
+            self.cursor_h_axis      = JoyAxis(self.joy_state, Xbox.AXIS_LEFT_X)
+            self.cursor_v_axis      = JoyAxis(self.joy_state, Xbox.AXIS_LEFT_Y)
 
-            self.grad_base_axis = JoyAxis(self.joy_state, Xbox.AXIS_RIGHT_X)
-            self.grad_range_axis = JoyAxis(self.joy_state, Xbox.AXIS_RIGHT_Y)
+            self.dpad_h_plus  = JoyPov(self.joy_state, Xbox.AXIS_DPAD_HORIZONTAL, Xbox.DPAD_RIGHT_VAL)
+            self.dpad_h_minus = JoyPov(self.joy_state, Xbox.AXIS_DPAD_HORIZONTAL, Xbox.DPAD_LEFT_VAL)
+            self.dpad_v_plus  = JoyPov(self.joy_state, Xbox.AXIS_DPAD_VERTICAL,   Xbox.DPAD_UP_VAL)
+            self.dpad_v_minus = JoyPov(self.joy_state, Xbox.AXIS_DPAD_VERTICAL,   Xbox.DPAD_DOWN_VAL)
 
-            self.dpad_h_plus = JoyPov(
-                self.joy_state,
-                Xbox.AXIS_DPAD_HORIZONTAL,
-                Xbox.DPAD_RIGHT_VAL)
-            self.dpad_h_minus = JoyPov(
-                self.joy_state,
-                Xbox.AXIS_DPAD_HORIZONTAL,
-                Xbox.DPAD_LEFT_VAL)
-            self.dpad_v_plus = JoyPov(
-                self.joy_state,
-                Xbox.AXIS_DPAD_VERTICAL,
-                Xbox.DPAD_UP_VAL)
-            self.dpad_v_minus = JoyPov(
-                self.joy_state,
-                Xbox.AXIS_DPAD_VERTICAL,
-                Xbox.DPAD_DOWN_VAL)
+            self.cursor_smaller_axis = JoyAxis(self.joy_state, Xbox.AXIS_LEFT_TRIGGER)
+            self.cursor_larger_axis  = JoyAxis(self.joy_state, Xbox.AXIS_RIGHT_TRIGGER)
 
-            self.select_btn = JoyButton(self.joy_state, Xbox.BUTTON_A)
-            self.select_btn2 = JoyButton(self.joy_state, Xbox.BUTTON_LEFT_STICK)
-            self.reset_grad_btn = JoyButton(self.joy_state, Xbox.BUTTON_RIGHT_STICK)
-            self.invert_btn = JoyButton(self.joy_state, Xbox.BUTTON_Y)
-            self.skip_fwd_btn = JoyButton(self.joy_state, Xbox.BUTTON_LEFT_BUMPER)
-            self.prev_scan_btn = JoyButton(self.joy_state, Xbox.BUTTON_RIGHT_BUMPER)
-            self.next_scan_btn = JoyButton(self.joy_state, Xbox.BUTTON_B)
-            self.clear_btn = JoyButton(self.joy_state, Xbox.BUTTON_X)
-            self.save_btn = JoyButton(self.joy_state, Xbox.BUTTON_RIGHT_CENTER)
-            self.skip_back_btn = JoyButton(self.joy_state, Xbox.BUTTON_LEFT_CENTER)
+            self.grad_base_axis     = JoyAxis(self.joy_state, Xbox.AXIS_RIGHT_X)
+            self.grad_range_axis    = JoyAxis(self.joy_state, Xbox.AXIS_RIGHT_Y)
+
+            self.select_btn       = JoyButton(self.joy_state, Xbox.BUTTON_A)
+            self.select_btn2      = JoyButton(self.joy_state, Xbox.BUTTON_LEFT_STICK)
+            self.reset_grad_btn   = JoyButton(self.joy_state, Xbox.BUTTON_RIGHT_STICK)
+            self.next_scan_btn    = JoyButton(self.joy_state, Xbox.BUTTON_RIGHT_BUMPER)
+            self.prev_scan_btn    = JoyButton(self.joy_state, Xbox.BUTTON_LEFT_BUMPER)
+            # self.prev_scan_btn    = JoyButton(self.joy_state, Xbox.BUTTON_X)
+            # self.next_scan_btn    = JoyButton(self.joy_state, Xbox.BUTTON_B)
+            self.clear_btn        = JoyButton(self.joy_state, Xbox.BUTTON_X)
+            self.save_btn         = JoyButton(self.joy_state, Xbox.BUTTON_Y)
 
         def update(self, joy: Joy):
             self.joy_state.update(joy)
@@ -304,7 +243,6 @@ class ImageAnnotatorNode(Node):
         self.declare_parameter("azimuth_offset_deg",   AZIMUTH_OFFSET_DEG)
         self.declare_parameter("cursor_speed",         CURSOR_SPEED_DEFAULT)
         self.declare_parameter("ledger_path",          LEDGER_PATH)
-        self.declare_parameter("reviewed_scans_path",  REVIEWED_SCANS_PATH)
         self.declare_parameter("skip_jump_size",       SKIP_JUMP_SIZE)
 
         p = self.get_parameter
@@ -319,7 +257,6 @@ class ImageAnnotatorNode(Node):
         self._grid_cols            = int(p("grid_cols").value)
         self._azimuth_offset_deg   = p("azimuth_offset_deg").value
         self._ledger_path          = p("ledger_path").value
-        self._reviewed_scans_path  = p("reviewed_scans_path").value
         self._skip_jump_size       = int(p("skip_jump_size").value)
         self._grid_rows            = len(self._layer_elevations_deg)
 
@@ -334,8 +271,7 @@ class ImageAnnotatorNode(Node):
 
         # ── Ledger ──────────────────────────────────────────────────────────
         self._load_ledger()
-        self._ledger_file   = open(self._ledger_path,         "a", buffering=1)
-        self._reviewed_file = open(self._reviewed_scans_path, "a", buffering=1)
+        self._ledger_file = open(self._ledger_path, "a", buffering=1)
 
         # ── Bag reader ──────────────────────────────────────────────────────
         self._frame_id = "lidar"
@@ -346,7 +282,7 @@ class ImageAnnotatorNode(Node):
         # ── Scan cache ──────────────────────────────────────────────────────
         self._scan_cache  = {}
         self._cache_order = []
-        self._cache_limit = 20
+        self._cache_limit = 100
 
         # ── Per-scan state ──────────────────────────────────────────────────
         self._xyz:           np.ndarray | None = None
@@ -365,24 +301,17 @@ class ImageAnnotatorNode(Node):
         self._cursor_layer:  int = 0
         self._cursor_col:    int = 0
         self._col_accum:     float = 0.0
-        self._pt_cursor_rad: float = MARKER_RADIUS_M
+        self._pt_cursor_rad: float = PC_CURSOR_MARKER_RAD_M
 
         self._scan_idx = 0
         self._load_scan(self._scan_idx)
 
-        # Input edge-detection state.
-        # self._prev_joy_time: RclTime            = None
-        # self._prev_buttons: list[int]           = []
-        # self._prev_axes:    list[float]         = []
-
         self._controls = ImageAnnotatorNode.JoyControls()
-        self._dpad_hold_times: list[RclTime] = []
-        self._grad_base: float = 0
+        self._dpad_hold_times: list[float] = []
+        self._grad_base:  float = 0
         self._grad_range: float = 2.5
 
-        # Tracks when outputs were last published (nanoseconds, ROS time).
-        # Used to rate-limit joy-driven republishes to JOY_REPUBLISH_HZ.
-        self._last_publish_ns: int = 0
+        self._last_publish_ns:      int = 0
         self._joy_republish_min_ns: int = int(1e9 / JOY_REPUBLISH_HZ)
 
         # ── QoS ────────────────────────────────────────────────────────────
@@ -393,10 +322,10 @@ class ImageAnnotatorNode(Node):
         )
 
         # ── Publishers ──────────────────────────────────────────────────────
-        self._cloud_pub     = self.create_publisher(PointCloud2, self._out_cloud,            qos)
-        self._image_pub     = self.create_publisher(Image,       self._out_image,            qos)
-        self._img_annot_pub = self.create_publisher(ImageMarker, IMAGE_ANNOTATION_TOPIC,     qos)
-        self._marker_pub    = self.create_publisher(Marker,      CURSOR_MARKER_TOPIC,        qos)
+        self._cloud_pub     = self.create_publisher(PointCloud2, self._out_cloud,         qos)
+        self._image_pub     = self.create_publisher(Image,       self._out_image,         qos)
+        self._img_annot_pub = self.create_publisher(ImageMarker, IMAGE_ANNOTATION_TOPIC,  qos)
+        self._marker_pub    = self.create_publisher(Marker,      CURSOR_MARKER_TOPIC,     qos)
 
         # ── Subscribers ─────────────────────────────────────────────────────
         self.create_subscription(Joy, "/joy", self._on_joy, qos)
@@ -406,8 +335,9 @@ class ImageAnnotatorNode(Node):
 
         self.get_logger().info(
             f"RangeAnnotator ready. "
-            f"A=Select/Deselect, B=Next, RB=Prev, LB=Skip+{self._skip_jump_size}, "
-            f"X=Clear, Start=Force save. Total scans: {len(self._scan_timestamps)}"
+            f"A/LS=Select, B=Next, RB=Prev, LB=Skip+{self._skip_jump_size}, "
+            f"Back=Skip-{self._skip_jump_size}, X=Clear, Start=Force save. "
+            f"Total scans: {len(self._scan_timestamps)}"
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -508,8 +438,7 @@ class ImageAnnotatorNode(Node):
         if self._grid_cols != self._img_width:
             self._img_width = self._grid_cols
             self._layer_to_row, self._img_height = build_layer_row_map(
-                self._layer_elevations_rad,
-                self._grid_cols,
+                self._layer_elevations_rad, self._grid_cols,
             )
             self.get_logger().info(
                 f"Image geometry: {self._grid_cols}x{self._img_height} px"
@@ -525,33 +454,28 @@ class ImageAnnotatorNode(Node):
     def _on_joy(self, msg: Joy) -> None:
         self._controls.update(msg)
 
-        t = self._controls.joy_state.stamp
+        t  = self._controls.joy_state.stamp
         dt = self._controls.joy_state.dt
 
         if not self._dpad_hold_times:
             self._dpad_hold_times = [t] * 4
 
         if self._layer_to_row is not None and self._img_height:
-            cursor_speed = (
-                self._cursor_speed *
-                (1 - self._controls.cursor_speed_axis.trigger_value())
-            )
-
             self._cursor_x -= (
                 self._controls.cursor_h_axis.deadzone_value(STICK_DEADZONE) *
-                dt * cursor_speed
+                dt * self._cursor_speed
             )
             self._cursor_y += (
                 self._controls.cursor_v_axis.deadzone_value(STICK_DEADZONE) *
-                dt * cursor_speed
+                dt * self._cursor_speed
             )
 
             ROW_INCREMENT = self._img_height / self._grid_rows
             DPAD_BUTTONS = [
-                (self._controls.dpad_h_minus, (-1,  0),             (-0.5,  0)),
-                (self._controls.dpad_h_plus,  (+1,  0),             (+0.5,  0)),
-                (self._controls.dpad_v_plus,  ( 0, +ROW_INCREMENT), ( 0, +0.5)),
-                (self._controls.dpad_v_minus, ( 0, -ROW_INCREMENT), ( 0, -0.5))
+                (self._controls.dpad_h_minus, (-1,  0),              (-0.5,  0)),
+                (self._controls.dpad_h_plus,  (+1,  0),              (+0.5,  0)),
+                (self._controls.dpad_v_plus,  ( 0, +ROW_INCREMENT),  ( 0, +0.5)),
+                (self._controls.dpad_v_minus, ( 0, -ROW_INCREMENT),  ( 0, -0.5)),
             ]
 
             for i, D in enumerate(DPAD_BUTTONS):
@@ -560,24 +484,23 @@ class ImageAnnotatorNode(Node):
                 if D[0].was_pressed():
                     self._cursor_x += D[1][0]
                     self._cursor_y += D[1][1]
-                if (t - self._dpad_hold_times[i]) > DPAD_HOLD_THRESHOLD:
-                    self._cursor_x += D[2][0] * dt * cursor_speed
-                    self._cursor_y += D[2][1] * dt * cursor_speed
+                if (t - self._dpad_hold_times[i]) > BUTTON_HELD_THRESH:
+                    self._cursor_x += D[2][0] * dt * self._cursor_speed
+                    self._cursor_y += D[2][1] * dt * self._cursor_speed
 
-            self._cursor_x = self._cursor_x % self._img_width
-            self._cursor_y = max(0, min(self._cursor_y, self._img_height - 1))
-
-            self._cursor_col = math.floor(self._cursor_x)
+            self._cursor_x     = self._cursor_x % self._img_width
+            self._cursor_y     = max(0, min(self._cursor_y, self._img_height - 1))
+            self._cursor_col   = math.floor(self._cursor_x)
             self._cursor_layer = math.floor(self._cursor_y / ROW_INCREMENT)
 
             self._pt_cursor_rad += (
-                self._controls.marker_size_axis.trigger_value() *
-                (-1 if self._controls.invert_btn.raw_value() else 1) *
+                (self._controls.cursor_larger_axis.raw_value() -
+                 self._controls.cursor_smaller_axis.raw_value()) *
                 (0.1 * dt)
             )
             self._pt_cursor_rad = max(
-                MARKER_RADIUS_MIN_M,
-                min(self._pt_cursor_rad, MARKER_RADIUS_MAX_M)
+                PC_CURSOR_MARKER_RAD_MIN_M,
+                min(self._pt_cursor_rad, PC_CURSOR_MARKER_RAD_MAX_M),
             )
 
             self._grad_base -= (
@@ -586,26 +509,36 @@ class ImageAnnotatorNode(Node):
             self._grad_range += (
                 self._controls.grad_range_axis.deadzone_value(STICK_DEADZONE) * dt
             )
-            self._grad_base = max(0, self._grad_base)
+            self._grad_base  = max(0, self._grad_base)
             self._grad_range = max(1e-7, self._grad_range)
 
         if self._controls.reset_grad_btn.was_pressed():
-            self._grad_base = 0
+            self._grad_base  = 0
             self._grad_range = 2.5
 
         if (self._controls.select_btn.was_pressed() or
                 self._controls.select_btn2.was_pressed()):
             self._toggle_selection()
+
         elif self._controls.clear_btn.was_pressed():
             self._clear_selections()
+
         elif self._controls.next_scan_btn.was_pressed():
             self._navigate_scan(1, skipped=False)
         elif self._controls.prev_scan_btn.was_pressed():
             self._navigate_scan(-1, skipped=False)
-        elif self._controls.skip_fwd_btn.was_pressed():
-            self._navigate_scan(self._skip_jump_size, skipped=True)
-        elif self._controls.skip_back_btn.was_pressed():
-            self._navigate_scan(-self._skip_jump_size, skipped=True)
+
+        elif self._controls.next_scan_btn.was_held(BUTTON_HELD_THRESH):
+            self._navigate_scan(
+                math.floor(self._skip_jump_size * dt),
+                skipped=True
+            )
+        elif self._controls.prev_scan_btn.was_held(BUTTON_HELD_THRESH):
+            self._navigate_scan(
+                math.floor(-self._skip_jump_size * dt),
+                skipped=True
+            )
+
         elif self._controls.save_btn.was_pressed():
             self._save_current_scan_to_memory()
             self._write_scan_to_ledger(self._scan_idx, skipped=False)
@@ -615,9 +548,6 @@ class ImageAnnotatorNode(Node):
         now_ns = self.get_clock().now().nanoseconds
         if now_ns - self._last_publish_ns >= self._joy_republish_min_ns:
             self._do_republish()
-
-    def _step_layer(self, direction: int) -> None:
-        self._cursor_layer = max(0, min(self._grid_rows - 1, self._cursor_layer + direction))
 
     def _toggle_selection(self) -> None:
         cell = (self._cursor_layer, self._cursor_col)
@@ -649,48 +579,66 @@ class ImageAnnotatorNode(Node):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _write_scan_to_ledger(self, idx: int, skipped: bool = False):
+        """
+        Writes a single snapshot record for the given scan capturing its
+        complete, current selection state:
+
+            {"bag": "...", "scan_stamp_ns": 123, "session": "...",
+             "skipped": false, "selections": [[ring, col, range_m], ...]}
+
+        The last record for any scan_stamp_ns is authoritative on load, so
+        removals are handled correctly: a later save with fewer selections
+        simply supersedes earlier saves that included those points. No
+        tombstones, no separate reviews file.
+        """
         scan     = self._get_scan(idx)
         stamp_ns = scan["stamp_ns"]
         selections = self._all_selections.get(stamp_ns, set())
 
+        sel_list = []
         for (ring, col) in sorted(selections):
             rng = None
             if self._range_grid is not None:
                 v = float(self._range_grid[ring, col])
                 if not math.isnan(v):
-                    rng = v
-            record = {
-                "bag":                 os.path.basename(self._bag_path),
-                "scan_stamp_ns":       stamp_ns,
-                "ring":                ring,
-                "azimuth_idx":         col,
-                "range_m":             rng,
-                "heuristic_mechanism": None,
-                "heuristic_score":     None,
-                "label":               "artifact",
-                "session":             SESSION_ID,
-            }
-            self._ledger_file.write(json.dumps(record) + "\n")
-        self._ledger_file.flush()
+                    rng = round(v, 3)  # mm precision is sufficient
+            sel_list.append([ring, col, rng])
 
-        review_record = {
+        record = {
             "bag":           os.path.basename(self._bag_path),
             "scan_stamp_ns": stamp_ns,
-            "n_candidates":  0,
-            "n_confirmed":   len(selections),
             "session":       SESSION_ID,
             "skipped":       skipped,
+            "selections":    sel_list,
         }
-        self._reviewed_file.write(json.dumps(review_record) + "\n")
-        self._reviewed_file.flush()
+        self._ledger_file.write(json.dumps(record) + "\n")
+        self._ledger_file.flush()
 
     def _load_ledger(self):
+        """
+        Loads selections from the ledger using last-write-wins per scan.
+
+        New format: each line is a snapshot. The last record for a given
+        scan_stamp_ns is the authoritative selection state, so deselections
+        made in a later session are correctly reflected even though the file
+        is append-only.
+
+        Backward compat:
+          - Old snapshot with dict items: {"selections": [{"ring":..., "col":...}]}
+          - Old per-point format: {"label": "artifact", "ring":..., "azimuth_idx":...}
+            These are accumulated as before, but any subsequent snapshot for the
+            same stamp overwrites them entirely.
+        """
         self._all_selections: dict[int, set] = {}
         if not os.path.exists(self._ledger_path):
             return
 
-        self.get_logger().info(f"Loading existing selections from: {self._ledger_path}")
-        loaded = 0
+        self.get_logger().info(f"Loading selections from: {self._ledger_path}")
+        # Tracks which stamps have been given a definitive snapshot record.
+        # Once a stamp is snapshotted, old per-point accumulation is ignored
+        # for that stamp regardless of record order.
+        snapshotted: set[int] = set()
+
         try:
             with open(self._ledger_path, "r") as f:
                 for line in f:
@@ -702,26 +650,47 @@ class ImageAnnotatorNode(Node):
                         stamp_ns = data.get("scan_stamp_ns")
                         if stamp_ns is None:
                             continue
-                        if "label" in data and data.get("label") == "artifact":
-                            ring = data.get("ring")
-                            col  = data.get("azimuth_idx")
-                            if ring is not None and col is not None:
-                                self._all_selections.setdefault(stamp_ns, set()).add((ring, col))
-                                loaded += 1
-                        elif "selections" in data:
+
+                        if "selections" in data:
+                            # Snapshot format (new compact or old grouped dict).
+                            # Last write wins: unconditionally overwrite.
+                            sels = set()
                             for item in data["selections"]:
-                                r = item.get("ring")
-                                c = item.get("col") or item.get("azimuth_idx")
-                                if r is not None and c is not None:
-                                    self._all_selections.setdefault(stamp_ns, set()).add((r, c))
-                                    loaded += 1
+                                if isinstance(item, list) and len(item) >= 2:
+                                    # New: [ring, col, range_m?]
+                                    sels.add((int(item[0]), int(item[1])))
+                                elif isinstance(item, dict):
+                                    # Old grouped: {"ring": ..., "col": ...}
+                                    r = item.get("ring")
+                                    c = item.get("col") or item.get("azimuth_idx")
+                                    if r is not None and c is not None:
+                                        sels.add((int(r), int(c)))
+                            self._all_selections[stamp_ns] = sels
+                            snapshotted.add(stamp_ns)
+
+                        elif "label" in data and data.get("label") == "artifact":
+                            # Old per-point format. Only accumulate if no snapshot
+                            # has appeared for this stamp (snapshot is authoritative).
+                            if stamp_ns not in snapshotted:
+                                ring = data.get("ring")
+                                col  = data.get("azimuth_idx")
+                                if ring is not None and col is not None:
+                                    self._all_selections.setdefault(
+                                        stamp_ns, set()
+                                    ).add((int(ring), int(col)))
+
                     except Exception as e:
                         self.get_logger().warn(f"Skipped malformed ledger line: {e}")
-            self.get_logger().info(
-                f"Loaded {loaded} selections across {len(self._all_selections)} scans."
-            )
+
         except Exception as e:
             self.get_logger().error(f"Error reading ledger: {e}")
+
+        n_pts = sum(len(v) for v in self._all_selections.values())
+        self.get_logger().info(
+            f"Loaded {n_pts} selections across {len(self._all_selections)} scans "
+            f"({len(snapshotted)} snapshot, "
+            f"{len(self._all_selections) - len(snapshotted)} legacy per-point)."
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # Publishing
@@ -758,9 +727,10 @@ class ImageAnnotatorNode(Node):
             px_row = int(self._layer_to_row[layer])
             if 0 <= px_row < H:
                 row_data = rg[layer, :]
-                norm_row_data = np.clip(
-                    (row_data - self._grad_base) / self._grad_range, 0, 1)
-                img[px_row, :] = np.where(np.isfinite(row_data), norm_row_data, np.nan)
+                norm     = np.clip(
+                    (row_data - self._grad_base) / self._grad_range, 0, 1
+                )
+                img[px_row, :] = np.where(np.isfinite(row_data), norm, np.nan)
 
         img_msg = Image()
         img_msg.header.stamp    = stamp
@@ -774,12 +744,6 @@ class ImageAnnotatorNode(Node):
         self._image_pub.publish(img_msg)
 
     def _publish_image_annotations(self, stamp) -> None:
-        """
-        Publishes cursor and all selected cells as a single POINTS ImageMarker
-        with per-point colors via outline_colors. Using one message with one id
-        avoids the Foxglove multi-id rendering issue. Scale=1.0 gives a single
-        pixel per point.
-        """
         if self._layer_to_row is None:
             return
 
@@ -790,33 +754,25 @@ class ImageAnnotatorNode(Node):
         marker.id     = 0
         marker.type   = ImageMarker.POINTS
         marker.action = ImageMarker.ADD
-        marker.scale  = 0.25   # single pixel
+        marker.scale  = 0.25
 
-        def add_point(col: int, row: int, color: tuple):
-            r, g, b = color
-            marker.points.append(GeoPoint(
-                x=float(col) + 0.25,
-                y=float(row) + 0.25,
-                z=0.0,
-            ))
-            marker.outline_colors.append(
-                ColorRGBA(r=r / 255.0, g=g / 255.0, b=b / 255.0, a=0.75)
-            )
+        def add_point(col: float, row: float, color: tuple):
+            r, g, b, a = color
+            marker.points.append(GeoPoint(x=col + 0.25, y=row + 0.25, z=0.0))
+            marker.outline_colors.append(ColorRGBA(r=r, g=g, b=b, a=a))
 
-        # Cursor point (drawn last so it renders on top of any selection
-        # that shares the same cell).
         for (sel_layer, sel_col) in self._selected:
             if 0 <= sel_layer < self._grid_rows:
                 sel_row = self._layer_to_row[sel_layer]
-                add_point(sel_col,       sel_row,       COLOR_SELECT_IMG)
-                add_point(sel_col,       sel_row + 0.5, COLOR_SELECT_IMG)
-                add_point(sel_col + 0.5, sel_row,       COLOR_SELECT_IMG)
-                add_point(sel_col + 0.5, sel_row + 0.5, COLOR_SELECT_IMG)
+                add_point(sel_col,       sel_row,       IMG_SELECTED_COLOR)
+                add_point(sel_col,       sel_row + 0.5, IMG_SELECTED_COLOR)
+                add_point(sel_col + 0.5, sel_row,       IMG_SELECTED_COLOR)
+                add_point(sel_col + 0.5, sel_row + 0.5, IMG_SELECTED_COLOR)
 
         if 0 <= self._cursor_layer < self._grid_rows:
-            color = (COLOR_CURSEL_IMG
-                        if ((self._cursor_layer, self._cursor_col) in self._selected)
-                        else COLOR_CURSOR_IMG)
+            color   = (IMG_CURSOR_SELECT_COLOR
+                       if (self._cursor_layer, self._cursor_col) in self._selected
+                       else IMG_CURSOR_COLOR)
             sel_row = self._layer_to_row[self._cursor_layer]
             add_point(self._cursor_col - 0.5, sel_row - 0.5, color)
             add_point(self._cursor_col - 0.5, sel_row,       color)
@@ -874,7 +830,10 @@ class ImageAnnotatorNode(Node):
         d = self._pt_cursor_rad * 2.0
         marker.scale.x = marker.scale.y = marker.scale.z = d
         marker.color.r, marker.color.g, marker.color.b, marker.color.a = (
-            MARKER_SELECTED_COLOR if ((cur_layer, cur_col) in self._selected) else MARKER_COLOR)
+            PC_CURSOR_SELECT_MARKER_COLOR
+            if (cur_layer, cur_col) in self._selected
+            else PC_CURSOR_MARKER_COLOR
+        )
         self._marker_pub.publish(marker)
 
     def _publish_cloud(self, stamp) -> None:
@@ -882,32 +841,22 @@ class ImageAnnotatorNode(Node):
         if xyz is None:
             return
 
-        N = xyz.shape[0]
+        N      = xyz.shape[0]
+        colors = np.full(N, pack_rgb_float(*PC_DEFAULT_COLOR), dtype=np.float32)
 
-        # Default: grayscale from normalised range value using _grad_base / _grad_range.
-        # Each point lives at a (layer, col) cell; look up its range, normalise, and
-        # pack as an equal-channel RGB float.  Points with no valid range fall back to
-        # the flat default colour.
-        colors = np.full(N, pack_rgb_float(*COLOR_DEFAULT_CLOUD), dtype=np.float32)
         if self._point_idx_img is not None and self._range_grid is not None:
-            # grad_range = self._grad_range if self._grad_range != 0 else 1.0
-
-            # Flatten the grid arrays so we can process all cells at once.
-            flat_idx  = self._point_idx_img[:self._grid_rows, :self._num_cols].ravel().astype(np.int32)
-            flat_rng  = self._range_grid[:self._grid_rows, :self._num_cols].ravel()
-
-            # Only consider cells that have a valid point index and a finite range.
-            valid = (flat_idx >= 0) & np.isfinite(flat_rng)
+            flat_idx = self._point_idx_img[:self._grid_rows, :self._num_cols].ravel().astype(np.int32)
+            flat_rng = self._range_grid[:self._grid_rows, :self._num_cols].ravel()
+            valid    = (flat_idx >= 0) & np.isfinite(flat_rng)
             if valid.any():
-                v = np.clip((flat_rng[valid] - self._grad_base) / self._grad_range, 0.0, 1.0)
-                g = (v * 255).astype(np.uint32)
-                # Pack as 0x00RRGGBB where R == G == B == g.
+                v = np.clip(
+                    (flat_rng[valid] - self._grad_base) / self._grad_range, 0.0, 1.0
+                )
+                g      = (v * 255).astype(np.uint32)
                 packed = (g << 16) | (g << 8) | g
-                gray_floats = packed.view(np.float32) if packed.dtype == np.uint32 else \
-                              packed.astype(np.uint32).view(np.float32)
-                colors[flat_idx[valid]] = gray_floats
+                colors[flat_idx[valid]] = packed.astype(np.uint32).view(np.float32)
 
-        sel_color = pack_rgb_float(*COLOR_SELECT_CLOUD)
+        sel_color = pack_rgb_float(*PC_SELECTED_COLOR)
         for (sel_layer, sel_col) in self._selected:
             if 0 <= sel_layer < self._grid_rows:
                 idx = int(self._point_idx_img[sel_layer, sel_col])
@@ -919,7 +868,7 @@ class ImageAnnotatorNode(Node):
         if 0 <= cur_layer < self._grid_rows and 0 <= cur_col < self._num_cols:
             cur_idx = int(self._point_idx_img[cur_layer, cur_col])
             if cur_idx >= 0:
-                colors[cur_idx] = pack_rgb_float(*COLOR_CURSOR_CLOUD)
+                colors[cur_idx] = pack_rgb_float(*PC_CURSOR_COLOR)
 
         fields = [
             PointField(name="x",   offset=0,  datatype=PointField.FLOAT32, count=1),
@@ -945,10 +894,9 @@ class ImageAnnotatorNode(Node):
     # ─────────────────────────────────────────────────────────────────────────
 
     def destroy_node(self):
-        for attr in ("_ledger_file", "_reviewed_file"):
-            handle = getattr(self, attr, None)
-            if handle:
-                handle.close()
+        handle = getattr(self, "_ledger_file", None)
+        if handle:
+            handle.close()
         if hasattr(self, "_reader") and self._reader:
             self._reader.close()
         super().destroy_node()
@@ -965,11 +913,11 @@ def main() -> None:
         node = ImageAnnotatorNode()
         rclpy.spin(node)
     except (KeyboardInterrupt, RuntimeError, FileNotFoundError) as e:
-        print(f"RangeAnnotator exiting: {e}")
+        print(f"RangeAnnotator exiting... {e}")
     finally:
         if node is not None:
             node.destroy_node()
-        rclpy.shutdown()
+        # rclpy.shutdown()
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@
             "cursor_speed": 100,
             "ledger_path": "range_annotations_ledger.jsonl",
             "reviewed_scans_path": "range_annotations_reviewed.jsonl",
-            "skip_jump_size": 100
+            "skip_jump_size": 1000
         }
     }
 }
