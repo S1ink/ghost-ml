@@ -29,9 +29,13 @@ visualization_msgs/ImageMarker POINTS message so the raw float image
 remains untouched. In Foxglove, point the Image panel's "Annotations"
 setting at IMAGE_ANNOTATION_TOPIC.
 
-Ledger format: one JSONL line per scan save.
-  {"bag": "...", "scan_stamp_ns": 123, "session": "...",
-   "selections": [[ring, col, range_m], ...]}
+Ledger format: two record types, both JSONL.
+  Session header (written once on startup):
+    {"type": "session", "session": "...", "bag": "...",
+     "layer_elevations_deg": [...], "grid_cols": N, "azimuth_offset_deg": X}
+  Scan annotation record (written per dirty/force-included scan):
+    {"bag": "...", "scan_stamp_ns": 123, "session": "...",
+     "selections": [[ring, col, range_m], ...]}
 Last record per scan_stamp_ns is authoritative (handles removals correctly).
 """
 
@@ -272,6 +276,7 @@ class ImageAnnotatorNode(Node):
         # ── Ledger ──────────────────────────────────────────────────────────
         self._load_ledger()
         self._ledger_file = open(self._ledger_path, "a", buffering=1)
+        self._write_session_header()
 
         # ── Bag reader ──────────────────────────────────────────────────────
         self._frame_id = "lidar"
@@ -616,6 +621,33 @@ class ImageAnnotatorNode(Node):
     # Ledger I/O
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _write_session_header(self):
+        """
+        Appends a one-time session header record to the ledger so that
+        downstream dataset scripts can identify exactly which grid parameters
+        (elevations, cols, azimuth offset) produced the annotations.
+
+            {"type": "session", "session": "...", "bag": "...",
+             "layer_elevations_deg": [...], "grid_cols": N,
+             "azimuth_offset_deg": X}
+        """
+        record = {
+            "type":                 "session",
+            "session":              SESSION_ID,
+            "bag":                  os.path.basename(self._bag_path),
+            "layer_elevations_deg": self._layer_elevations_deg,
+            "grid_cols":            self._grid_cols,
+            "azimuth_offset_deg":   self._azimuth_offset_deg,
+        }
+        self._ledger_file.write(json.dumps(record) + "\n")
+        self._ledger_file.flush()
+        self.get_logger().info(
+            f"Session header written: {SESSION_ID} "
+            f"({len(self._layer_elevations_deg)} layers, "
+            f"{self._grid_cols} cols, "
+            f"{self._azimuth_offset_deg}° azimuth offset)"
+        )
+
     def _write_scan_to_ledger(self, idx: int):
         """
         Writes a single snapshot record for the given scan capturing its
@@ -655,16 +687,11 @@ class ImageAnnotatorNode(Node):
         """
         Loads selections from the ledger using last-write-wins per scan.
 
-        New format: each line is a snapshot. The last record for a given
-        scan_stamp_ns is the authoritative selection state, so deselections
-        made in a later session are correctly reflected even though the file
-        is append-only.
-
-        Backward compat:
-          - Old snapshot with dict items: {"selections": [{"ring":..., "col":...}]}
-          - Old per-point format: {"label": "artifact", "ring":..., "azimuth_idx":...}
-            These are accumulated as before, but any subsequent snapshot for the
-            same stamp overwrites them entirely.
+        Record types:
+          - Session header: {"type": "session", ...} — no scan_stamp_ns, skipped.
+          - Scan snapshot:  {"scan_stamp_ns": ..., "selections": [...]} — authoritative.
+          - Legacy per-point: {"ring": ..., "azimuth_idx": ...} — accumulated unless
+            a later snapshot supersedes.
         """
         self._all_selections: dict[int, set] = {}
         if not os.path.exists(self._ledger_path):
