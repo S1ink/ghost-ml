@@ -14,11 +14,14 @@ Joystick-driven offline annotation tool that:
      valid layer rows (never lands on a blank spacer).
   4. Simultaneously highlights the corresponding 3-D point in the published
      XYZRGB cloud and publishes a 3D sphere marker so both views stay in sync.
-  5. Pressing A selects / deselects the current cell. B advances to the next
-     scan, and RB goes back.
-  6. Selections are stored in memory and written to a JSONL ledger on
-     navigation (one snapshot record per scan save, last-write-wins per scan).
-     Existing selections are reloaded on startup.
+  5. Pressing A selects / deselects the current cell. RB advances to the next
+     scan, and LB goes back. Holding either scrubs without writing.
+  6. Y explicitly marks the current frame for ledger inclusion, even if it has
+     no selections (an "errorless" training sample).
+  7. Selections are stored in memory and written to a JSONL ledger on
+     single-press navigation, but ONLY if the scan was modified (dirty) or
+     explicitly included via Y. Held-button scrubbing never writes to the
+     ledger. Existing selections are reloaded on startup.
 
 Published image is 32FC1 float (normalised range, NaN for empty cells).
 Image overlays (cursor, selected-point dots) are published as a single
@@ -28,7 +31,7 @@ setting at IMAGE_ANNOTATION_TOPIC.
 
 Ledger format: one JSONL line per scan save.
   {"bag": "...", "scan_stamp_ns": 123, "session": "...",
-   "skipped": false, "selections": [[ring, col, range_m], ...]}
+   "selections": [[ring, col, range_m], ...]}
 Last record per scan_stamp_ns is authoritative (handles removals correctly).
 """
 
@@ -86,17 +89,16 @@ BUTTON_HELD_THRESH = 0.25
 # ── Visual colours ─────────────────────────────────────────────────────────────
 PC_DEFAULT_COLOR  = (175, 175, 175)
 PC_SELECTED_COLOR = (255, 30,  30)
-PC_CURSOR_COLOR   = (30,  220, 100)
 
 IMG_SELECTED_COLOR      = (1.0, 0.1, 0.1, 1.0)
 IMG_CURSOR_COLOR        = (0.1, 0.9, 0.4, 1.0)
 IMG_CURSOR_SELECT_COLOR = (0.9, 0.9, 0.1, 1.0)
 
-PC_CURSOR_MARKER_RAD_M        = 0.045
+PC_CURSOR_MARKER_RAD_M        = 0.025
 PC_CURSOR_MARKER_RAD_MIN_M    = 0.005
 PC_CURSOR_MARKER_RAD_MAX_M    = 0.5
 PC_CURSOR_MARKER_COLOR        = (0.1, 0.9, 0.4, 1.0)
-PC_CURSOR_SELECT_MARKER_COLOR = (0.9, 0.9, 0.1, 1.0)
+PC_CURSOR_SELECT_MARKER_COLOR = (0.9, 0.6, 0.1, 1.0)
 
 REPUBLISH_HZ      = 10.0
 JOY_REPUBLISH_HZ  = 30.0
@@ -218,13 +220,11 @@ class ImageAnnotatorNode(Node):
 
             self.select_btn       = JoyButton(self.joy_state, Xbox.BUTTON_A)
             self.select_btn2      = JoyButton(self.joy_state, Xbox.BUTTON_LEFT_STICK)
+            self.clear_btn        = JoyButton(self.joy_state, Xbox.BUTTON_X)
+            self.save_btn         = JoyButton(self.joy_state, Xbox.BUTTON_B)
             self.reset_grad_btn   = JoyButton(self.joy_state, Xbox.BUTTON_RIGHT_STICK)
             self.next_scan_btn    = JoyButton(self.joy_state, Xbox.BUTTON_RIGHT_BUMPER)
             self.prev_scan_btn    = JoyButton(self.joy_state, Xbox.BUTTON_LEFT_BUMPER)
-            # self.prev_scan_btn    = JoyButton(self.joy_state, Xbox.BUTTON_X)
-            # self.next_scan_btn    = JoyButton(self.joy_state, Xbox.BUTTON_B)
-            self.clear_btn        = JoyButton(self.joy_state, Xbox.BUTTON_X)
-            self.save_btn         = JoyButton(self.joy_state, Xbox.BUTTON_Y)
 
         def update(self, joy: Joy):
             self.joy_state.update(joy)
@@ -303,6 +303,12 @@ class ImageAnnotatorNode(Node):
         self._col_accum:     float = 0.0
         self._pt_cursor_rad: float = PC_CURSOR_MARKER_RAD_M
 
+        # Dirty tracking: True when selections were modified during this visit
+        # or the scan was explicitly force-included via Y.
+        self._scan_dirty:    bool = False
+        # Snapshot of selections at load time, used to detect changes.
+        self._selected_at_load: set[tuple[int, int]] = set()
+
         self._scan_idx = 0
         self._load_scan(self._scan_idx)
 
@@ -335,8 +341,8 @@ class ImageAnnotatorNode(Node):
 
         self.get_logger().info(
             f"RangeAnnotator ready. "
-            f"A/LS=Select, B=Next, RB=Prev, LB=Skip+{self._skip_jump_size}, "
-            f"Back=Skip-{self._skip_jump_size}, X=Clear, Start=Force save. "
+            f"A/LS=Select, RB=Next, LB=Prev (hold to scrub), "
+            f"X=Clear, B=Force include, B+RB/LB=Include+Nav. "
             f"Total scans: {len(self._scan_timestamps)}"
         )
 
@@ -402,6 +408,8 @@ class ImageAnnotatorNode(Node):
 
         self._process_cloud(msg)
         self._selected = set(self._all_selections.get(scan["stamp_ns"], []))
+        self._selected_at_load = set(self._selected)
+        self._scan_dirty = False
 
         self.get_logger().info(
             f"Scan {idx + 1}/{len(self._scan_timestamps)} "
@@ -523,26 +531,31 @@ class ImageAnnotatorNode(Node):
         elif self._controls.clear_btn.was_pressed():
             self._clear_selections()
 
+        # B + RB/LB combo: force-include then navigate.
+        # Checked before plain RB/LB so the held B doesn't get missed.
+        elif (self._controls.save_btn.raw_value() and
+                self._controls.next_scan_btn.was_pressed()):
+            # self._force_include_scan()
+            self._scan_dirty = True
+            self._navigate_scan(1)
+        elif (self._controls.save_btn.raw_value() and
+                self._controls.prev_scan_btn.was_pressed()):
+            # self._force_include_scan()
+            self._scan_dirty = True
+            self._navigate_scan(-1)
+
         elif self._controls.next_scan_btn.was_pressed():
-            self._navigate_scan(1, skipped=False)
+            self._navigate_scan(1)
         elif self._controls.prev_scan_btn.was_pressed():
-            self._navigate_scan(-1, skipped=False)
+            self._navigate_scan(-1)
 
         elif self._controls.next_scan_btn.was_held(BUTTON_HELD_THRESH):
-            self._navigate_scan(
-                math.floor(self._skip_jump_size * dt),
-                skipped=True
-            )
+            self._scrub_scan(math.floor(self._skip_jump_size * dt))
         elif self._controls.prev_scan_btn.was_held(BUTTON_HELD_THRESH):
-            self._navigate_scan(
-                math.floor(-self._skip_jump_size * dt),
-                skipped=True
-            )
+            self._scrub_scan(math.floor(-self._skip_jump_size * dt))
 
-        elif self._controls.save_btn.was_pressed():
-            self._save_current_scan_to_memory()
-            self._write_scan_to_ledger(self._scan_idx, skipped=False)
-            self.get_logger().info(f"Force-saved scan {self._scan_idx + 1}.")
+        # elif self._controls.save_btn.was_pressed():
+        #     self._force_include_scan()
 
         # Re-publish outputs immediately if the rate window allows.
         now_ns = self.get_clock().now().nanoseconds
@@ -557,16 +570,46 @@ class ImageAnnotatorNode(Node):
         else:
             self._selected.add(cell)
             self.get_logger().info(f"Selected:   ring={cell[0]} col={cell[1]}")
+        self._scan_dirty = True
 
     def _clear_selections(self) -> None:
+        if self._selected:
+            # Had selections that are now being removed — mark dirty so the
+            # empty state is written to the ledger on navigate (overwriting
+            # the old record).
+            self._scan_dirty = True
         self._selected.clear()
         self.get_logger().info("Selections cleared.")
 
-    def _navigate_scan(self, delta: int, skipped: bool = False):
+    def _is_scan_dirty(self) -> bool:
+        """True if the current scan's selections differ from what was loaded."""
+        return self._scan_dirty or self._selected != self._selected_at_load
+
+    def _navigate_scan(self, delta: int):
+        """Single-press navigation: saves to ledger only if dirty."""
         self._save_current_scan_to_memory()
-        self._write_scan_to_ledger(self._scan_idx, skipped=skipped)
+        if self._is_scan_dirty():
+            self._write_scan_to_ledger(self._scan_idx)
         new_idx = max(0, min(self._scan_idx + delta, len(self._scan_timestamps) - 1))
         self._load_scan(new_idx)
+
+    def _scrub_scan(self, delta: int):
+        """Held-button scrubbing: navigates without writing to ledger."""
+        self._save_current_scan_to_memory()
+        new_idx = max(0, min(self._scan_idx + delta, len(self._scan_timestamps) - 1))
+        self._load_scan(new_idx)
+
+    def _force_include_scan(self):
+        """B button: explicitly include this scan in the ledger even if it has
+        no selections (marking it as an errorless training sample). Also used
+        as part of B+RB / B+LB combo to force-include before navigating."""
+        self._scan_dirty = True
+        self._save_current_scan_to_memory()
+        self._write_scan_to_ledger(self._scan_idx)
+        self.get_logger().info(
+            f"Force-included scan {self._scan_idx + 1} "
+            f"({len(self._selected)} selections)."
+        )
 
     def _save_current_scan_to_memory(self):
         if not self._scan_timestamps:
@@ -578,13 +621,13 @@ class ImageAnnotatorNode(Node):
     # Ledger I/O
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _write_scan_to_ledger(self, idx: int, skipped: bool = False):
+    def _write_scan_to_ledger(self, idx: int):
         """
         Writes a single snapshot record for the given scan capturing its
         complete, current selection state:
 
             {"bag": "...", "scan_stamp_ns": 123, "session": "...",
-             "skipped": false, "selections": [[ring, col, range_m], ...]}
+             "selections": [[ring, col, range_m], ...]}
 
         The last record for any scan_stamp_ns is authoritative on load, so
         removals are handled correctly: a later save with fewer selections
@@ -608,7 +651,6 @@ class ImageAnnotatorNode(Node):
             "bag":           os.path.basename(self._bag_path),
             "scan_stamp_ns": stamp_ns,
             "session":       SESSION_ID,
-            "skipped":       skipped,
             "selections":    sel_list,
         }
         self._ledger_file.write(json.dumps(record) + "\n")
@@ -862,13 +904,6 @@ class ImageAnnotatorNode(Node):
                 idx = int(self._point_idx_img[sel_layer, sel_col])
                 if idx >= 0:
                     colors[idx] = sel_color
-
-        cur_layer = self._cursor_layer
-        cur_col   = self._cursor_col
-        if 0 <= cur_layer < self._grid_rows and 0 <= cur_col < self._num_cols:
-            cur_idx = int(self._point_idx_img[cur_layer, cur_col])
-            if cur_idx >= 0:
-                colors[cur_idx] = pack_rgb_float(*PC_CURSOR_COLOR)
 
         fields = [
             PointField(name="x",   offset=0,  datatype=PointField.FLOAT32, count=1),
