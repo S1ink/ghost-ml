@@ -47,7 +47,6 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSDurabilityPolicy, QoSHistoryPolicy
-from rclpy.time import Time as RclTime
 from sensor_msgs.msg import Image, Joy, PointCloud2, PointField
 from sensor_msgs_py import point_cloud2 as pc2
 from std_msgs.msg import Header, ColorRGBA
@@ -242,8 +241,8 @@ class ImageAnnotatorNode(Node):
         self.declare_parameter("grid_cols",            GRID_COLS)
         self.declare_parameter("azimuth_offset_deg",   AZIMUTH_OFFSET_DEG)
         self.declare_parameter("cursor_speed",         CURSOR_SPEED_DEFAULT)
+        self.declare_parameter("scrub_speed",          SKIP_JUMP_SIZE)
         self.declare_parameter("ledger_path",          LEDGER_PATH)
-        self.declare_parameter("skip_jump_size",       SKIP_JUMP_SIZE)
 
         p = self.get_parameter
         self._bag_path             = p("bag_path").value
@@ -256,12 +255,13 @@ class ImageAnnotatorNode(Node):
         )
         self._grid_cols            = int(p("grid_cols").value)
         self._azimuth_offset_deg   = p("azimuth_offset_deg").value
+        self._scrub_speed          = int(p("scrub_speed").value)
         self._ledger_path          = p("ledger_path").value
-        self._skip_jump_size       = int(p("skip_jump_size").value)
         self._grid_rows            = len(self._layer_elevations_deg)
 
         self._cursor_speed: int = max(
-            CURSOR_SPEED_MIN, min(CURSOR_SPEED_MAX, int(p("cursor_speed").value))
+            CURSOR_SPEED_MIN,
+            min(CURSOR_SPEED_MAX, int(p("cursor_speed").value))
         )
 
         if not self._bag_path:
@@ -286,7 +286,6 @@ class ImageAnnotatorNode(Node):
 
         # ── Per-scan state ──────────────────────────────────────────────────
         self._xyz:           np.ndarray | None = None
-        self._ranges_flat:   np.ndarray | None = None
         self._range_grid:    np.ndarray | None = None
         self._point_idx_img: np.ndarray | None = None
         self._num_cols:      int = 0
@@ -300,7 +299,6 @@ class ImageAnnotatorNode(Node):
         self._cursor_y:      float = 0
         self._cursor_layer:  int = 0
         self._cursor_col:    int = 0
-        self._col_accum:     float = 0.0
         self._pt_cursor_rad: float = PC_CURSOR_MARKER_RAD_M
 
         # Dirty tracking: True when selections were modified during this visit
@@ -437,7 +435,6 @@ class ImageAnnotatorNode(Node):
         )
 
         self._xyz           = xyz.astype(np.float32)
-        self._ranges_flat   = grid["ranges"].astype(np.float32)
         self._range_grid    = range_grid
         self._point_idx_img = point_idx_img
         self._num_cols      = self._grid_cols
@@ -535,12 +532,10 @@ class ImageAnnotatorNode(Node):
         # Checked before plain RB/LB so the held B doesn't get missed.
         elif (self._controls.save_btn.raw_value() and
                 self._controls.next_scan_btn.was_pressed()):
-            # self._force_include_scan()
             self._scan_dirty = True
             self._navigate_scan(1)
         elif (self._controls.save_btn.raw_value() and
                 self._controls.prev_scan_btn.was_pressed()):
-            # self._force_include_scan()
             self._scan_dirty = True
             self._navigate_scan(-1)
 
@@ -550,9 +545,9 @@ class ImageAnnotatorNode(Node):
             self._navigate_scan(-1)
 
         elif self._controls.next_scan_btn.was_held(BUTTON_HELD_THRESH):
-            self._scrub_scan(math.floor(self._skip_jump_size * dt))
+            self._scrub_scan(math.floor(self._scrub_speed * dt))
         elif self._controls.prev_scan_btn.was_held(BUTTON_HELD_THRESH):
-            self._scrub_scan(math.floor(-self._skip_jump_size * dt))
+            self._scrub_scan(math.floor(-self._scrub_speed * dt))
 
         # elif self._controls.save_btn.was_pressed():
         #     self._force_include_scan()
@@ -701,16 +696,10 @@ class ImageAnnotatorNode(Node):
                                 if isinstance(item, list) and len(item) >= 2:
                                     # New: [ring, col, range_m?]
                                     sels.add((int(item[0]), int(item[1])))
-                                elif isinstance(item, dict):
-                                    # Old grouped: {"ring": ..., "col": ...}
-                                    r = item.get("ring")
-                                    c = item.get("col") or item.get("azimuth_idx")
-                                    if r is not None and c is not None:
-                                        sels.add((int(r), int(c)))
                             self._all_selections[stamp_ns] = sels
                             snapshotted.add(stamp_ns)
 
-                        elif "label" in data and data.get("label") == "artifact":
+                        elif "ring" in data and "azimuth_idx" in data:
                             # Old per-point format. Only accumulate if no snapshot
                             # has appeared for this stamp (snapshot is authoritative).
                             if stamp_ns not in snapshotted:
