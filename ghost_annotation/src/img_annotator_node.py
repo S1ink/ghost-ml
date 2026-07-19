@@ -228,6 +228,7 @@ class ImageAnnotatorNode(Node):
             self.reset_grad_btn   = JoyButton(self.joy_state, Xbox.BUTTON_RIGHT_STICK)
             self.next_scan_btn    = JoyButton(self.joy_state, Xbox.BUTTON_RIGHT_BUMPER)
             self.prev_scan_btn    = JoyButton(self.joy_state, Xbox.BUTTON_LEFT_BUMPER)
+            self.invert_ctrls_btn = JoyButton(self.joy_state, Xbox.BUTTON_LEFT_CENTER)
 
         def update(self, joy: Joy):
             self.joy_state.update(joy)
@@ -315,10 +316,11 @@ class ImageAnnotatorNode(Node):
         self._scan_idx = 0
         self._load_scan(self._scan_idx)
 
-        self._controls = ImageAnnotatorNode.JoyControls()
+        self._controls                     = ImageAnnotatorNode.JoyControls()
         self._dpad_hold_times: list[float] = []
-        self._grad_base:  float = 0
-        self._grad_range: float = 2.5
+        self._grad_base:             float = 0
+        self._grad_range:            float = 2.5
+        self._invert_ctrls:           bool = False
 
         self._last_publish_ns:      int = 0
         self._joy_republish_min_ns: int = int(1e9 / JOY_REPUBLISH_HZ)
@@ -470,14 +472,18 @@ class ImageAnnotatorNode(Node):
         if not self._dpad_hold_times:
             self._dpad_hold_times = [t] * 4
 
+        if self._controls.invert_ctrls_btn.was_pressed():
+            self._invert_ctrls = not self._invert_ctrls
+
         if self._layer_to_row is not None and self._img_height:
+            DIR = (-1 if self._invert_ctrls else 1)
             self._cursor_x -= (
                 self._controls.cursor_h_axis.deadzone_value(STICK_DEADZONE) *
-                dt * self._cursor_speed
+                dt * self._cursor_speed * DIR
             )
             self._cursor_y += (
                 self._controls.cursor_v_axis.deadzone_value(STICK_DEADZONE) *
-                dt * self._cursor_speed
+                dt * self._cursor_speed * DIR
             )
 
             ROW_INCREMENT = self._img_height / self._grid_rows
@@ -492,11 +498,11 @@ class ImageAnnotatorNode(Node):
                 if not D[0].raw_value():
                     self._dpad_hold_times[i] = t
                 if D[0].was_pressed():
-                    self._cursor_x += D[1][0]
-                    self._cursor_y += D[1][1]
+                    self._cursor_x += D[1][0] * DIR
+                    self._cursor_y += D[1][1] * DIR
                 if (t - self._dpad_hold_times[i]) > BUTTON_HELD_THRESH:
-                    self._cursor_x += D[2][0] * dt * self._cursor_speed
-                    self._cursor_y += D[2][1] * dt * self._cursor_speed
+                    self._cursor_x += D[2][0] * dt * self._cursor_speed * DIR
+                    self._cursor_y += D[2][1] * dt * self._cursor_speed * DIR
 
             self._cursor_x     = self._cursor_x % self._img_width
             self._cursor_y     = max(0, min(self._cursor_y, self._img_height - 1))
