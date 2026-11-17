@@ -1,0 +1,1621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lidar artifact annotator</title>
+<style>
+  :root {
+    --bg: #14171b; --panel: #1b1f25; --panel2: #232830; --line: #2f3640;
+    --text: #d9dee5; --dim: #8a94a3; --accent: #4da3ff;
+    --sel: #ff3df2; --prop: #ff9d2e; --ok: #4cc38a; --warn: #e5c14a; --bad: #ef6b6b;
+    /* chart series, dark steps: blue, orange, aqua, yellow */
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --sideW: 320px; --imgH: 218px;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; scrollbar-width: thin; scrollbar-color: #3a4350 transparent; }
+  html, body { height: 100%; margin: 0; background: var(--bg); color: var(--text);
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  body { display: grid; grid-template-columns: var(--sideW) 5px minmax(0, 1fr); overflow: hidden; }
+  button, select, input { font: inherit; color: var(--text); }
+  button { background: var(--panel2); border: 1px solid var(--line); border-radius: 5px;
+    padding: 4px 9px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: #1f4f85; border-color: #2f6fb5; }
+  button.on { background: #1f4f85; border-color: var(--accent); }
+  button.danger:hover { border-color: var(--bad); color: var(--bad); }
+  button.mini { padding: 0 6px; font-size: 11.5px; }
+  button:disabled { opacity: .45; cursor: default; }
+  select, input[type=text], input[type=number] { background: var(--bg);
+    border: 1px solid var(--line); border-radius: 4px; padding: 3px 5px; }
+  kbd { background: var(--panel2); border: 1px solid var(--line); border-radius: 3px;
+    padding: 0 4px; font: 11px ui-monospace, monospace; white-space: nowrap; }
+  .num { font-variant-numeric: tabular-nums; }
+  .small { color: var(--dim); font-size: 11.5px; }
+  .grow { flex: 1; }
+
+  /* sidebar */
+  #side { background: var(--panel); overflow-y: auto; min-width: 0; }
+  #sidehead { display: flex; align-items: center; gap: 6px; padding: 9px 10px;
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--panel); z-index: 2; }
+  #sidehead b { flex: 1; }
+  details.sec { border-bottom: 1px solid var(--line); }
+  details.sec > summary { list-style: none; display: flex; align-items: center; gap: 6px;
+    padding: 7px 10px; cursor: pointer; user-select: none; font-size: 11px;
+    text-transform: uppercase; letter-spacing: .06em; color: var(--dim); background: #181c21; }
+  details.sec > summary::-webkit-details-marker { display: none; }
+  details.sec > summary::before { content: "▸"; width: 10px; color: var(--dim); }
+  details.sec[open] > summary::before { content: "▾"; }
+  details.sec > summary:hover { color: var(--text); }
+  details.sec > summary .ttl { flex: 1; }
+  details.sec > summary .cnt { text-transform: none; letter-spacing: 0; }
+  details.sec > summary button { text-transform: none; letter-spacing: 0; font-size: 12px; padding: 1px 8px; }
+  details.sec > .body { padding: 8px 10px 12px; }
+  .bag { padding: 6px 7px; border: 1px solid transparent; border-radius: 5px;
+    cursor: pointer; margin-bottom: 3px; position: relative; }
+  .bag:hover { background: var(--panel2); }
+  .bag.cur { border-color: var(--accent); background: var(--panel2); }
+  .bag .ttl { font-weight: 600; }
+  .bag .file { color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #bags { max-height: 46vh; overflow-y: auto; }
+  .bag .meta { color: var(--dim); font-size: 11.5px; }
+  .bag .acts { position: absolute; right: 5px; top: 5px; display: none; gap: 3px; }
+  .bag:hover .acts { display: flex; }
+  .tag { display: inline-block; font-size: 10.5px; padding: 0 5px; border-radius: 8px;
+    border: 1px solid var(--line); color: var(--dim); margin-left: 4px; font-weight: 400; }
+  .bar2 { height: 4px; border-radius: 2px; background: var(--line); margin-top: 4px; overflow: hidden; display: flex; }
+  .bar2 i { display: block; height: 100%; }
+  table { border-collapse: collapse; width: 100%; font-size: 11.5px; }
+  th, td { text-align: right; padding: 3px 5px; }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--dim); font-weight: 500; border-bottom: 1px solid var(--line); }
+  tr.cur td { background: var(--panel2); }
+  .q { display: flex; justify-content: space-between; padding: 2px 6px; border-radius: 4px; cursor: pointer; }
+  .q:hover { background: var(--panel2); }
+  .q.cur { outline: 1px solid var(--accent); }
+  .job { border: 1px solid var(--line); border-radius: 5px; padding: 5px 6px; margin-bottom: 4px; }
+  .job pre { margin: 4px 0 0; font: 10.5px/1.35 ui-monospace, monospace; color: var(--dim);
+    white-space: pre-wrap; word-break: break-all; max-height: 130px; overflow-y: auto; }
+  .running { color: var(--accent); } .done { color: var(--ok); } .failed { color: var(--bad); }
+  .progress { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin: 6px 0 4px; }
+  .progress i { display: block; height: 100%; background: var(--accent); transition: width .4s; }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 1px 10px; font-size: 12px; }
+  .kv span:nth-child(odd) { color: var(--dim); }
+  .card { border: 1px solid var(--line); border-radius: 6px; padding: 7px 8px; margin-bottom: 7px; }
+  .card h4 { margin: 0 0 4px; font-size: 12px; font-weight: 600; }
+
+  /* splitters */
+  #vsplit { cursor: col-resize; background: var(--line); }
+  #hsplit { cursor: row-resize; background: var(--line); height: 5px; }
+  #vsplit:hover, #hsplit:hover, .dragging { background: var(--accent) !important; }
+
+  /* main */
+  #main { display: grid; grid-template-rows: auto auto auto auto auto minmax(0, 1fr) auto; min-width: 0; min-height: 0; height: 100vh; }
+  #top, #imgbar, #bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 10px;
+    background: var(--panel); }
+  #top { border-bottom: 1px solid var(--line); }
+  #imgbar { border-bottom: 1px solid var(--line); font-size: 12px; gap: 12px; padding: 4px 10px; }
+  #bar { border-top: 1px solid var(--line); font-size: 12px; gap: 12px; }
+  #imgbar label, #bar label { display: flex; align-items: center; gap: 5px; color: var(--dim); }
+  #imgbar input[type=range], #bar input[type=range] { width: 100px; }
+  .seg { display: inline-flex; }
+  .seg button { border-radius: 0; margin-left: -1px; padding: 2px 9px; }
+  .seg button:first-child { border-radius: 5px 0 0 5px; margin-left: 0; }
+  .seg button:last-child { border-radius: 0 5px 5px 0; }
+  .chip { padding: 1px 9px; border-radius: 10px; border: 1px solid var(--line); font-size: 12px; }
+  .chip.complete { border-color: var(--ok); color: var(--ok); }
+  .chip.partial { border-color: var(--warn); color: var(--warn); }
+  .chip.dirty { border-color: var(--bad); color: var(--bad); }
+  #scrubwrap { padding: 4px 10px 2px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  #scrub { width: 100%; margin: 0; display: block; }
+  #ticks { width: 100%; height: 8px; display: block; }
+  #imgwrap { position: relative; background: #0b0d10; height: var(--imgH); }
+  #img { display: block; width: 100%; height: 100%; cursor: crosshair; }
+  #glwrap { position: relative; min-height: 0; }
+  #gl { display: block; width: 100%; height: 100%; }
+  #hud { position: absolute; left: 10px; top: 8px; pointer-events: none;
+    font: 12px ui-monospace, monospace; color: var(--text); text-shadow: 0 0 3px #000; }
+  #legend { position: absolute; right: 10px; top: 8px; pointer-events: none; font-size: 11.5px;
+    color: var(--dim); text-align: right; text-shadow: 0 0 3px #000; }
+  #legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin: 0 4px 0 10px; }
+  #empty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--dim); font-size: 14px; pointer-events: none; }
+  #shape { position: fixed; inset: 0; width: 100vw; height: 100vh; pointer-events: none; z-index: 5; }
+
+  /* modals */
+  .modal { position: fixed; inset: 0; background: #000a; display: none; align-items: center;
+    justify-content: center; z-index: 10; }
+  .modal.open { display: flex; }
+  .modal .box { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    width: min(860px, 94vw); max-height: 90vh; display: flex; flex-direction: column; padding: 14px; }
+  .modal .box.wide { width: min(1180px, 96vw); }
+  .modal .head { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .modal .head b { font-size: 15px; }
+  .modal .scroll { overflow-y: auto; min-height: 0; }
+  .modal .row { display: flex; justify-content: space-between; gap: 10px; padding: 4px 6px;
+    border-radius: 4px; align-items: center; }
+  .modal .row:hover { background: var(--panel2); }
+  #m-help h3 { margin: 16px 0 6px; font-size: 13px; color: var(--accent); }
+  #m-help h3:first-child { margin-top: 0; }
+  #m-help p, #m-help li { color: var(--text); line-height: 1.55; margin: 4px 0; }
+  #m-help ul, #m-help ol { margin: 4px 0; padding-left: 20px; }
+  #m-help td, #m-help th { text-align: left; padding: 3px 8px 3px 0; vertical-align: top; font-size: 12.5px; }
+  #m-help td:first-child { white-space: nowrap; }
+  .cols2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 900px) { .cols2 { grid-template-columns: 1fr; } }
+  .panel { border: 1px solid var(--line); border-radius: 6px; padding: 10px; min-width: 0; }
+  .panel h4 { margin: 0 0 2px; font-size: 13px; }
+  .panel .sub { color: var(--dim); font-size: 11.5px; margin-bottom: 6px; }
+  .legendrow { display: flex; gap: 14px; font-size: 11.5px; color: var(--dim); margin: 2px 0; }
+  .legendrow i { display: inline-block; width: 12px; height: 3px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
+  svg.chart { display: block; width: 100%; }
+  svg.chart text { fill: var(--dim); font: 10.5px system-ui, sans-serif; }
+  svg.chart .grid { stroke: var(--line); stroke-width: 1; }
+  #tip { position: fixed; display: none; z-index: 30; background: #000d; border: 1px solid var(--line);
+    border-radius: 5px; padding: 5px 8px; font-size: 11.5px; pointer-events: none; white-space: nowrap; }
+  #tip i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
+  #toast { position: fixed; bottom: 54px; left: 50%; transform: translateX(-50%);
+    background: #000c; border: 1px solid var(--line); padding: 6px 14px; border-radius: 6px;
+    display: none; z-index: 40; }
+</style>
+</head>
+<body>
+<div id="side">
+  <div id="sidehead"><b>Lidar artifact annotator</b>
+    <button id="helpBtn" title="How to use this (?)">Help</button></div>
+
+  <details class="sec" id="sec-bags" open><summary><span class="ttl">Bags</span>
+    <span class="cnt" id="bagsCnt"></span><button id="addBag">Add…</button></summary>
+    <div class="body"><div id="bags"></div><div id="unreg" class="small"></div></div></details>
+
+  <details class="sec" id="sec-queue" open><summary><span class="ttl">Review queue</span>
+    <span class="cnt" id="queueCnt"></span><button id="refreshQueue" title="Recompute suggestions">↻</button></summary>
+    <div class="body"><div id="queue" class="small">Select a bag.</div></div></details>
+
+  <details class="sec" id="sec-model" open><summary><span class="ttl">Model and training</span>
+    <span class="cnt" id="modelCnt"></span></summary>
+    <div class="body">
+      <div id="model" class="small">No model yet.</div>
+      <div style="margin:8px 0; display:flex; gap:6px; align-items:center; flex-wrap:wrap">
+        <button id="train" class="primary">Train</button>
+        <span class="small">default threshold</span>
+        <input id="trainThr" type="number" min="0.05" max="0.95" step="0.05" value="0.3" style="width:58px">
+        <span class="grow"></span><button id="chartsBtn">Charts…</button>
+      </div>
+      <div id="trainLive"></div>
+    </div></details>
+
+  <details class="sec" id="sec-acc"><summary><span class="ttl">Accuracy on this bag</span>
+    <span class="cnt" id="accCnt"></span></summary>
+    <div class="body"><div id="acc" class="small">Select a bag.</div></div></details>
+
+  <details class="sec" id="sec-files"><summary><span class="ttl">Files and export</span>
+    <span class="cnt" id="filesCnt"></span></summary>
+    <div class="body">
+      <div id="filesSum" class="small"></div>
+      <div style="margin-top:8px; display:flex; gap:6px; flex-wrap:wrap">
+        <button id="export">Export classified bag</button>
+        <button id="filesBtn">Manage files…</button>
+      </div>
+      <div class="small" style="margin-top:6px">Export writes a copy of the selected bag with an
+        <code>artifact_prob</code> field, flagged at the proposal threshold.</div>
+    </div></details>
+
+  <details class="sec" id="sec-jobs"><summary><span class="ttl">Jobs</span>
+    <span class="cnt" id="jobsCnt"></span></summary>
+    <div class="body"><div id="jobs" class="small">None.</div></div></details>
+</div>
+<div id="vsplit" title="Drag to resize, double-click to reset"></div>
+
+<div id="main">
+  <div id="top">
+    <button id="prev" title="Previous scan (←)">◀</button>
+    <button id="next" title="Next scan (→)">▶</button>
+    <span id="where" class="num">No bag selected</span>
+    <span id="status" class="chip">–</span>
+    <span id="dirty" class="chip dirty" style="display:none">unsaved</span>
+    <span class="grow"></span>
+    <span id="counts" class="small num"></span>
+    <button id="undo" title="Undo the last selection change (Ctrl+Z)">Undo</button>
+    <button id="accept" title="Select every proposal (A)">Accept proposals</button>
+    <button id="clear" title="Clear selection (X)">Clear</button>
+    <button id="savePartial" title="Save, not complete (S)">Save partial</button>
+    <button id="saveComplete" class="primary" title="Every error is selected: save and go on (Enter)">Complete &amp; next</button>
+    <select id="after" title="Where Complete &amp; next (Enter) goes">
+      <option value="queue">→ review queue</option>
+      <option value="unconfirmed">→ next unconfirmed scan</option>
+      <option value="scan">→ next scan</option>
+    </select>
+  </div>
+  <div id="scrubwrap">
+    <input id="scrub" type="range" min="0" max="0" value="0">
+    <canvas id="ticks"></canvas>
+  </div>
+  <div id="imgbar">
+    <label>Select
+      <span class="seg" id="tools">
+        <button data-tool="point" title="Click or paint single points (P)">Point</button>
+        <button data-tool="box" title="Drag a rectangle (B)">Box</button>
+        <button data-tool="lasso" title="Draw around points (L)">Lasso</button>
+      </span></label>
+    <span class="small" id="toolHint"></span>
+    <span class="grow"></span>
+    <label>Colour
+      <select id="colour">
+        <option value="range">range</option>
+        <option value="grey">range, greyscale</option>
+        <option value="prob">model probability</option>
+        <option value="intensity">intensity</option>
+        <option value="plain">plain</option>
+      </select></label>
+    <label title="Turn the image upside down (V)"><input id="vflip" type="checkbox"> upside down</label>
+    <label title="Mirror the image left-right (M)"><input id="hflip" type="checkbox"> mirrored</label>
+    <label title="Azimuth at the centre of the image ([ and ])">centre
+      <input id="shift" type="range" min="-180" max="180" step="5" value="0">
+      <span id="shiftV" class="num" style="width:36px">0°</span></label>
+  </div>
+  <div id="imgwrap"><canvas id="img"></canvas></div>
+  <div id="hsplit" title="Drag to resize, double-click to reset"></div>
+  <div id="glwrap">
+    <canvas id="gl"></canvas>
+    <div id="hud"></div>
+    <div id="legend">
+      <i style="background:var(--sel)"></i>selected (error)
+      <i style="background:var(--prop)"></i>model proposal
+      <i style="background:#fff"></i>focused
+    </div>
+    <div id="empty">Select a bag on the left.</div>
+  </div>
+  <div id="bar">
+    <label>Proposal threshold <input id="thr" type="range" min="0.05" max="0.95" step="0.05" value="0.3">
+      <span id="thrV" class="num">0.30</span></label>
+    <label>3D range <input id="maxr" type="range" min="1" max="40" step="0.5" value="6">
+      <span id="maxrV" class="num">6 m</span></label>
+    <label>Point size <input id="psize" type="range" min="2" max="12" step="0.5" value="5"></label>
+    <label><input id="ctx" type="checkbox"> neighbouring scans (±2)</label>
+    <label><input id="base" type="checkbox" checked> robot frame</label>
+  </div>
+</div>
+
+<svg id="shape"><polygon id="shapePoly" points="" fill="none"/></svg>
+
+<!-- add a bag -->
+<div class="modal" id="m-add"><div class="box">
+  <div class="head"><b>Add a bag</b>
+    <input id="filter" type="text" placeholder="filter by path or date" style="flex:1">
+    <button data-close>Close</button></div>
+  <div class="small">Bags under <span id="bagsRoot">the bags folder</span> that are not registered yet.
+    Adding one reads it once into the grid cache (a few minutes for a large bag).</div>
+  <div class="row" style="margin-top:8px"><input id="addPath" type="text" placeholder="or paste the full path of a bag file" style="flex:1">
+    <button id="addPathBtn" data-p="">Add</button></div>
+  <div class="scroll" id="browse" style="margin-top:8px"></div>
+</div></div>
+
+<!-- bag settings -->
+<div class="modal" id="m-bag"><div class="box" style="width:min(560px,94vw)">
+  <div class="head"><b>Bag settings</b><span class="grow"></span><button data-close>Close</button></div>
+  <div class="small" id="bagSetPath" style="word-break:break-all; margin-bottom:10px"></div>
+  <label class="small">Name (empty shows the date only)<br><input id="bagSetLabel" type="text" style="width:100%; margin:3px 0 10px"></label>
+  <label class="small">Lidar topic<br><select id="bagSetTopic" style="width:100%; margin:3px 0 4px"></select></label>
+  <div class="small">Changing the topic reads the bag again (a few minutes for a large one). Labels already saved for
+    this bag refer to cells of the old topic and are only right if both topics carry the same scans.</div>
+  <div style="margin-top:12px; text-align:right"><button id="bagSetSave" class="primary">Save</button></div>
+</div></div>
+
+<!-- files -->
+<div class="modal" id="m-files"><div class="box wide">
+  <div class="head"><b>Files</b><span class="grow"></span><button id="filesRefresh">Refresh</button><button data-close>Close</button></div>
+  <div class="scroll">
+    <h4 style="margin:4px 0">Models <span class="small" id="modelDir"></span></h4>
+    <div class="small" style="margin-bottom:4px">Every training run keeps the models it replaced. “Use” installs an
+      older set again (the current one is kept). Deleting is permanent.</div>
+    <div id="filesModels"></div>
+    <h4 style="margin:18px 0 4px">Exports <span class="small" id="outDir"></span></h4>
+    <div class="small" style="margin-bottom:4px">Classified bags and score files. Open the
+      <code>…_classified</code> folder of an export in Foxglove. Deleting is permanent.</div>
+    <div id="filesExports"></div>
+  </div>
+</div></div>
+
+<!-- charts -->
+<div class="modal" id="m-stats"><div class="box wide">
+  <div class="head"><b>Training and accuracy</b>
+    <label class="small">model <select id="statVar"><option value="xyz">range only</option>
+      <option value="full">with intensity</option></select></label>
+    <label class="small">bags <select id="statScope"><option value="all">all bags</option>
+      <option value="bag">selected bag</option></select></label>
+    <span class="grow"></span><button data-close>Close</button></div>
+  <div class="scroll">
+    <div class="cols2">
+      <div class="panel"><h4>Learning curve</h4><div class="sub" id="learnSub"></div><div id="chLearn"></div></div>
+      <div class="panel"><h4>Precision and recall by threshold</h4><div class="sub" id="prSub"></div><div id="chPR"></div></div>
+      <div class="panel"><h4>Training runs</h4><div class="sub">Average precision in cross-validation after each run.
+        Runs differ in their labelled scans, so compare loosely.</div><div id="chHist"></div><div id="histTable"></div></div>
+      <div class="panel"><h4>By bag</h4><div class="sub" id="bagSub"></div><div id="bagTable"></div></div>
+      <div class="panel"><h4>Scans reviewed since the last training</h4><div class="sub">The selected bag, scored now by the
+        installed model, which has never seen these scans.</div><div id="freshBox"></div></div>
+      <div class="panel"><h4>Where the labels are</h4><div class="sub">Labelled errors per 10° of lidar azimuth (the
+        horizontal axis of the range image, unshifted).</div><div id="chAz"></div></div>
+    </div>
+  </div>
+</div></div>
+
+<!-- help -->
+<div class="modal" id="m-help"><div class="box wide">
+  <div class="head"><b>How to use the annotator</b><span class="grow"></span><button data-close>Close</button></div>
+  <div class="scroll"><div class="cols2"><div>
+    <h3>The loop</h3>
+    <ol>
+      <li>Pick a bag in <b>Bags</b>. <b>Review queue</b> lists the scans the model is least sure about.</li>
+      <li>Model proposals are <span style="color:var(--prop)">orange</span>, your selections
+        <span style="color:var(--sel)">magenta</span>. Step through them with <kbd>Tab</kbd>, check each in 3D,
+        toggle with <kbd>Space</kbd>, or press <kbd>A</kbd> to accept every proposal and then fix the exceptions.</li>
+      <li>When every error in the scan is selected, press <kbd>Enter</kbd>: the scan is saved as
+        <b>complete</b> and the next queue item opens.</li>
+      <li>After 30 or more new scans, press <b>Train</b> (about a minute). Proposals and the queue then come from the new model.</li>
+      <li><b>Export classified bag</b> writes a bag you can inspect in Foxglove.</li>
+    </ol>
+    <h3>Complete and partial</h3>
+    <p><b>Complete</b> means every error in the scan is selected, so all other points are taught as clean. A scan
+      with nothing selected can be complete too. <b>Partial</b> (<kbd>S</kbd>) keeps your selections but is not trained
+      on; it is only used to check that the model finds what you selected. Scans written to the ledger by another tool carry no mark:
+      they are trained on when they have enough labels (6 unless <code>training.min_labels</code> says otherwise). To confirm them, set the menu beside “Complete &amp; next”
+      to “next unconfirmed scan” and press <kbd>Enter</kbd> on each one that is fully labelled: it walks through the
+      reviewed scans that are not marked complete, in timeline order. Leaving a scan with unsaved changes saves it, keeping its mark.</p>
+    <h3>Range image</h3>
+    <table>
+      <tr><td>Click, drag</td><td>Point tool: toggle a cell, paint along the drag</td></tr>
+      <tr><td>Wheel</td><td>Zoom in azimuth around the cursor</td></tr>
+      <tr><td>Right-drag</td><td>Pan (wraps around)</td></tr>
+      <tr><td><b>upside down</b>, <b>mirrored</b></td><td>Flip the image to match how the sensor is mounted (<kbd>V</kbd>, <kbd>M</kbd>)</td></tr>
+      <tr><td><b>centre</b></td><td>Rotate the image so a chosen azimuth is in the middle (<kbd>[</kbd> <kbd>]</kbd> step 15°)</td></tr>
+    </table>
+    <p class="small">The strip above the image marks the columns that hold proposals or selections. Flip, rotation,
+      colour mode and panel sizes are remembered between sessions.</p>
+    <h3>3D view</h3>
+    <table>
+      <tr><td>Drag</td><td>Orbit (Point tool). With Box or Lasso: <kbd>Alt</kbd>+drag or middle-drag</td></tr>
+      <tr><td>Right-drag</td><td>Pan</td></tr>
+      <tr><td>Wheel</td><td>Zoom</td></tr>
+      <tr><td>Click</td><td>Toggle the point under the cursor</td></tr>
+      <tr><td>Double-click</td><td>Orbit around that point</td></tr>
+    </table>
+    <p class="small">Rings are at 0.5, 1 and 2 m. Axes: x red, y green, z blue. Grey points are closer than the minimum range (0.2 m unless
+      <code>features.min_range_m</code> says otherwise) and are never classified. “Neighbouring scans” overlays the two scans before and after in grey.</p>
+    <h3>Selecting many points</h3>
+    <table>
+      <tr><td><b>Box</b> / <b>Lasso</b> tool</td><td>Drag in either view to select everything inside</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+drag</td><td>Remove the selected points inside instead</td></tr>
+      <tr><td><kbd>Shift</kbd>+drag</td><td>From the Point tool: one-off box or lasso (whichever was used last)</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>Cancel the shape being drawn</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>Undo, step by step, within the current scan</td></tr>
+    </table>
+    <p class="small">In 3D a shape takes every point that falls inside it on screen, including points behind others,
+      so orbit to a view where the cluster is clear of the background first. Only points within the 3D range are taken.</p>
+  </div><div>
+    <h3>Keys</h3>
+    <table>
+      <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>Previous / next scan (<kbd>Shift</kbd>: 10 scans)</td></tr>
+      <tr><td><kbd>Tab</kbd></td><td>Next proposal or selection, centred in both views (<kbd>Shift</kbd>: back)</td></tr>
+      <tr><td><kbd>Space</kbd></td><td>Toggle the focused point</td></tr>
+      <tr><td><kbd>A</kbd> / <kbd>X</kbd></td><td>Accept all proposals / clear the selection</td></tr>
+      <tr><td><kbd>Enter</kbd></td><td>Mark complete, save, go on. The menu beside “Complete &amp; next” sets where:
+        the review queue, the next unconfirmed scan, or simply the next scan</td></tr>
+      <tr><td><kbd>,</kbd> <kbd>.</kbd></td><td>Previous / next reviewed scan in the timeline</td></tr>
+      <tr><td><kbd>U</kbd></td><td>Next unconfirmed scan, without saving a mark</td></tr>
+      <tr><td><kbd>S</kbd></td><td>Save as partial</td></tr>
+      <tr><td><kbd>N</kbd></td><td>Next in queue without marking</td></tr>
+      <tr><td><kbd>P</kbd> <kbd>B</kbd> <kbd>L</kbd></td><td>Point, Box, Lasso tool</td></tr>
+      <tr><td><kbd>G</kbd></td><td>Switch between colour and greyscale range</td></tr>
+      <tr><td><kbd>V</kbd> / <kbd>M</kbd></td><td>Image upside down / mirrored</td></tr>
+      <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>Rotate the image by 15°</td></tr>
+      <tr><td><kbd>C</kbd></td><td>Neighbouring scans in 3D</td></tr>
+      <tr><td><kbd>R</kbd></td><td>Reset zoom and camera</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>Undo</td></tr>
+      <tr><td><kbd>?</kbd></td><td>This help</td></tr>
+    </table>
+    <h3>Bags</h3>
+    <p><b>Add…</b> lists every bag file under the bags folder (<code>bags_root</code> in the project's
+      <code>annotator.json</code>, or <code>--bags-root</code>); a bag anywhere else can be added by pasting its path. Hover a bag for ✎ (give it a name of your
+      own, or read it from another point cloud topic) and ✕ (take it off the list; labels and cache stay). The bar under each bag shows complete (green) and
+      other reviewed scans, partial or unmarked (yellow). The full path shows when you hover. Bags with three echoes show and label the nearest return of each beam.</p>
+    <h3>Training and the numbers</h3>
+    <p>Two models are trained: <b>range only</b> (works on any bag) and <b>with intensity</b> (used when the bag has
+      intensity). While training runs, the sidebar shows the stage and a learning curve; <b>Charts…</b> has the full view.</p>
+    <ul>
+      <li><b>Cross-validation</b>: the complete scans are split into five parts by time; each part is scored by a
+        model trained on the other four.</li>
+      <li><b>Precision</b>: of the points flagged, the share you had selected. Errors you never clicked count
+        against it, so it is a lower bound.</li>
+      <li><b>Recall</b>: of the points you selected, the share flagged.</li>
+      <li><b>Average precision</b>: one number for the whole precision-recall trade-off; higher is better.</li>
+      <li><b>Reviewed since training</b>: scans you saved after the installed model was trained. The model has
+        never seen them, so this is the most honest check.</li>
+    </ul>
+    <p>The <b>proposal threshold</b> slider sets what is shown as a proposal, what the accuracy numbers refer to and
+      what an export flags. The <b>default threshold</b> next to Train is stored in the model.</p>
+    <h3>Files</h3>
+    <p><b>Manage files…</b> lists every model set and every export with its date, size and contents. Delete what
+      you no longer need, or put an older model back with “Use”. The label ledger and the scan cache are never touched from there.</p>
+    <h3>Panels</h3>
+    <p>Drag the bar between the sidebar and the views, or between the range image and the 3D view, to resize.
+      Double-click a bar to reset it. Sidebar sections fold when you click their heading.</p>
+  </div></div></div>
+</div></div>
+
+<div id="tip"></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+let R = 14, C = 360, N = R * C, colDeg = 1;    // grid size; replaced by the sensor profile in start()
+const api = async (path, body) => {
+  const r = await fetch(path, body ? {method: "POST", body: JSON.stringify(body)} : undefined);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+};
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+let toastTimer;
+const toast = (msg, ms = 2200) => {
+  $("toast").textContent = msg; $("toast").style.display = "block";
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => $("toast").style.display = "none", ms);
+};
+
+// ── remembered settings ──────────────────────────────────────────────────
+const ui = Object.assign({sideW: 320, imgH: 218, vflip: false, hflip: false, shift: 0, colour: "range",
+  tool: "point", lastShape: "box", after: "queue", open: {}}, JSON.parse(localStorage.getItem("annotator.ui") || "{}"));
+const saveUi = () => localStorage.setItem("annotator.ui", JSON.stringify(ui));
+
+// ── state ────────────────────────────────────────────────────────────────
+let geom = null;          // beam directions
+let state = null;         // /api/state
+let bag = null;           // current bag name
+let scan = null;          // current scan payload
+let sel = new Set();      // selected cells (ring*360+col)
+let undoStack = [];
+let dirty = false;
+let focus = -1;           // focused cell
+let hover = -1;
+let reviewed = {};        // scan index -> [n labels, -1|0|1]
+let queue = [];           // suggested scans
+let loadSeq = 0;
+let reports = null;       // /api/reports
+let acc = null;           // /api/accuracy for the current bag
+let files = null;         // /api/files
+const view = {c0: 0, cols: C};                       // image zoom, in displayed columns
+const cam = {yaw: 2.6, pitch: 0.55, dist: 5, target: [0, 0, 0]};
+
+const thr = () => parseFloat($("thr").value);
+const minR = () => (geom ? geom.min_range_m * 1000 : 200);
+const isProp = c => scan.prob && scan.prob[c] >= Math.round(thr() * 255) && scan.range[c] >= minR();
+const selectable = c => scan && scan.range[c] >= minR();
+const mod = (a, n) => ((a % n) + n) % n;
+
+// ── formatting ───────────────────────────────────────────────────────────
+const f3 = v => v == null ? "–" : v.toFixed(3), pc = v => v == null || isNaN(v) ? "–" : Math.round(v * 100) + "%";
+const fmtBytes = b => b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : b >= 1e6 ? Math.round(b / 1e6) + " MB" : Math.max(1, Math.round(b / 1e3)) + " kB";
+const fmtDur = s => s >= 60 ? `${Math.floor(s / 60)} min ${String(Math.round(s % 60)).padStart(2, "0")} s` : `${Math.round(s)} s`;
+function fmtWhen(d, withYear = true) {
+  if (!d || isNaN(d)) return "";
+  return d.toLocaleDateString(undefined, {weekday: "short", day: "numeric", month: "short", ...(withYear ? {year: "numeric"} : {})})
+    + ", " + d.toLocaleTimeString(undefined, {hour: "2-digit", minute: "2-digit", hour12: false});
+}
+const parseNameDate = s => { const m = /(\d+)-(\d+)-(\d+) (\d+):(\d+):(\d+)/.exec(s || ""); return m ? new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null; };
+const parseStamp = s => { const m = /(\d{4})(\d\d)(\d\d)_(\d\d)(\d\d)(\d\d)/.exec(s || ""); return m ? new Date(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null; };
+const bagDate = b => parseNameDate(b.name_date) || (b.start ? new Date(b.start * 1000) : null);
+const bagInfo = name => state && state.bags.find(b => b.name === name);
+function bagTitle(name, short) {
+  const b = bagInfo(name);
+  if (!b) return (name || "").replace(/\.(mcap|db3)$/, "");
+  const d = fmtWhen(bagDate(b), !short);
+  return b.label ? (short ? b.label : `${b.label} (${d})`) : d || b.name.replace(/\.(mcap|db3)$/, "");
+}
+
+// ── colours ──────────────────────────────────────────────────────────────
+const TURBO = [[150,90,245],[70,120,240],[40,170,225],[30,225,160],[130,250,80],
+               [210,230,50],[250,170,40],[240,90,20],[150,20,5]];
+function ramp(t) {
+  t = Math.max(0, Math.min(1, t)) * (TURBO.length - 1);
+  const i = Math.min(TURBO.length - 2, Math.floor(t)), f = t - i;
+  return [0, 1, 2].map(k => (TURBO[i][k] * (1 - f) + TURBO[i + 1][k] * f) / 255);
+}
+function cellColour(c) {
+  const r = scan.range[c];
+  const near = r < minR();                             // too near: never classified
+  switch ($("colour").value) {
+    case "grey": {                                     // near = light, far = dark
+      if (near) return [0.2, 0.26, 0.36];
+      const v = 0.82 - 0.66 * Math.max(0, Math.min(1, Math.log(r / minR()) / Math.log(100)));
+      return [v, v, v];
+    }
+    case "prob": {
+      if (near) return [0.25, 0.27, 0.3];
+      const p = scan.prob ? scan.prob[c] / 255 : 0;
+      return [0.35 + 0.65 * p, 0.38 + 0.2 * p, 0.42 - 0.3 * p];
+    }
+    case "intensity":
+      if (near) return [0.25, 0.27, 0.3];
+      if (scan.intensity) return ramp(scan.intensity[c] / 65535);
+    // falls through when the bag has no intensity
+    case "range":
+      if (near) return [0.25, 0.27, 0.3];
+      return ramp(Math.log(r / minR()) / Math.log(100));  // minimum range .. 100 times that (0.2 m .. 20 m by default)
+    default:
+      return near ? [0.25, 0.27, 0.3] : [0.62, 0.68, 0.75];
+  }
+}
+const css = rgb => `rgb(${rgb.map(v => Math.round(v * 255)).join(",")})`;
+
+// ── range image ──────────────────────────────────────────────────────────
+// Displayed column d and row dr map to grid cells through the flip and
+// rotation settings; everything else works in grid cells.
+const img = $("img"), ictx = img.getContext("2d");
+const STRIP = 10, PAD = 12;
+const colOfDisp = d => { let u = mod(Math.floor(d), C); if (ui.hflip) u = C - 1 - u; return mod(u + ui.shift, C); };
+const dispOfCol = col => { let u = mod(col - ui.shift, C); if (ui.hflip) u = C - 1 - u; return u; };
+const rowOfDisp = dr => ui.vflip ? R - 1 - dr : dr;
+function dispNear(col) {                   // displayed column of a cell, inside the current window if possible
+  let d = dispOfCol(col);
+  while (d < Math.floor(view.c0)) d += C;
+  while (d >= view.c0 + C) d -= C;
+  return d;
+}
+function imgLayout() {
+  const w = img.clientWidth, h = img.clientHeight;
+  return {w, h, cw: w / view.cols, ch: (h - STRIP - PAD) / R, y0: STRIP};
+}
+function drawImage() {
+  const dpr = window.devicePixelRatio || 1;
+  const L = imgLayout();
+  if (img.width !== Math.round(L.w * dpr) || img.height !== Math.round(L.h * dpr)) { img.width = Math.round(L.w * dpr); img.height = Math.round(L.h * dpr); }
+  ictx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ictx.fillStyle = "#0b0d10"; ictx.fillRect(0, 0, L.w, L.h);
+  if (!scan) return;
+  const first = Math.floor(view.c0), last = Math.ceil(view.c0 + view.cols);
+  const marks = [];
+  for (let d = first; d < last; d++) {
+    const cc = colOfDisp(d), x = (d - view.c0) * L.cw;
+    for (let dr = 0; dr < R; dr++) {
+      const c = rowOfDisp(dr) * C + cc;
+      if (scan.range[c] > 0) {
+        ictx.fillStyle = css(cellColour(c));
+        ictx.fillRect(x, L.y0 + dr * L.ch, Math.ceil(L.cw), Math.ceil(L.ch) - 1);
+      }
+      if (sel.has(c)) marks.push([x, dr, c, "#ff3df2"]);
+      else if (isProp(c)) marks.push([x, dr, c, "#ff9d2e"]);
+    }
+  }
+  for (const [x, dr, c, colr] of marks) {
+    const y = L.y0 + dr * L.ch;
+    ictx.fillStyle = colr; ictx.fillRect(x, 0, Math.max(L.cw, 2), STRIP - 3);   // strip on top
+    if (L.cw < 7) { ictx.fillRect(x - 0.5, y, Math.max(L.cw, 2) + 1, L.ch - 1); }
+    else {
+      ictx.lineWidth = 2.5; ictx.strokeStyle = colr;
+      ictx.strokeRect(x + 1.2, y + 1.2, L.cw - 2.4, L.ch - 3.4);
+      if (sel.has(c)) { ictx.fillStyle = colr; ictx.fillRect(x + L.cw / 2 - 2, y + L.ch / 2 - 2.5, 4, 4); }
+    }
+  }
+  for (const [c, colr, lw] of [[hover, "#ffffff99", 1], [focus, "#ffffff", 2]]) {
+    if (c < 0) continue;
+    const x = (dispNear(c % C) - view.c0) * L.cw, y = L.y0 + rowOfDisp(Math.floor(c / C)) * L.ch;
+    ictx.lineWidth = lw; ictx.strokeStyle = colr;
+    ictx.strokeRect(x - 1, y - 1, Math.max(L.cw, 3) + 2, L.ch + 1);
+  }
+  // azimuth scale
+  ictx.fillStyle = "#8a94a3"; ictx.font = "10px ui-monospace, monospace";
+  const span = view.cols * colDeg, step = span > 200 ? 30 : span > 80 ? 10 : span > 30 ? 5 : Math.max(1, Math.ceil(colDeg));
+  for (let d = first; d < last; d++) {
+    const a = colOfDisp(d) * colDeg - 180;                 // label the column each tick falls in
+    if (mod(a + 1e-9, step) < colDeg) ictx.fillText(Math.round(a) + "°", (d - view.c0) * L.cw + 2, L.h - 2);
+  }
+}
+function cellAt(ev) {
+  const L = imgLayout(), b = img.getBoundingClientRect();
+  const x = ev.clientX - b.left, y = ev.clientY - b.top - L.y0;
+  const dr = Math.floor(y / L.ch);
+  if (dr < 0 || dr >= R) return -1;
+  return rowOfDisp(dr) * C + colOfDisp(view.c0 + x / L.cw);
+}
+let paint = null, panImg = null;
+img.addEventListener("contextmenu", e => e.preventDefault());
+img.addEventListener("mousedown", e => {
+  if (!scan) return;
+  if (e.button !== 0) { panImg = {x: e.clientX, c0: view.c0}; return; }
+  if (wantsShape(e)) { startShape(e, "img"); return; }
+  const c = cellAt(e);
+  if (c < 0 || !selectable(c)) return;
+  pushUndo();
+  paint = {add: !sel.has(c)};
+  setSel(c, paint.add); focus = c; redraw();
+});
+window.addEventListener("mousemove", e => {
+  if (shape) { moveShape(e); return; }
+  if (panImg) { view.c0 = panImg.c0 - (e.clientX - panImg.x) / imgLayout().cw; drawImage(); return; }
+  if (e.target !== img) return;
+  const c = cellAt(e);
+  if (paint && c >= 0 && selectable(c)) setSel(c, paint.add);
+  if (c !== hover) { hover = c; redraw(); }
+});
+window.addEventListener("mouseup", e => {
+  if (shape) endShape(e);
+  paint = null; panImg = null;
+  if (orbit && e.target !== glc) orbit = null;
+});
+img.addEventListener("mouseleave", () => { hover = -1; redraw(); });
+img.addEventListener("wheel", e => {
+  e.preventDefault();
+  const L = imgLayout(), b = img.getBoundingClientRect();
+  const at = view.c0 + (e.clientX - b.left) / L.cw;
+  const cols = Math.max(20, Math.min(C, view.cols * (e.deltaY > 0 ? 1.25 : 0.8)));
+  view.c0 = at - (at - view.c0) * cols / view.cols; view.cols = cols;
+  if (cols >= C) view.c0 = 0;
+  drawImage();
+}, {passive: false});
+
+// ── box and lasso ────────────────────────────────────────────────────────
+let shape = null;         // {where, kind, remove, pts: [[clientX, clientY], ...]}
+const wantsShape = e => ui.tool !== "point" ? !e.altKey : (e.shiftKey || e.ctrlKey);
+function startShape(e, where) {
+  const kind = ui.tool === "point" ? ui.lastShape : ui.tool;
+  shape = {where, kind, remove: e.ctrlKey || e.metaKey, pts: [[e.clientX, e.clientY]], moved: 0};
+  e.preventDefault();
+}
+function moveShape(e) {
+  const p0 = shape.pts[0];
+  shape.moved = Math.max(shape.moved, Math.abs(e.clientX - p0[0]) + Math.abs(e.clientY - p0[1]));
+  if (shape.kind === "box") shape.pts[1] = [e.clientX, e.clientY];
+  else shape.pts.push([e.clientX, e.clientY]);
+  drawShape();
+}
+function shapeOutline() {
+  if (shape.kind !== "box") return shape.pts;
+  const [a, b] = [shape.pts[0], shape.pts[1] || shape.pts[0]];
+  return [a, [b[0], a[1]], b, [a[0], b[1]]];
+}
+function drawShape() {
+  const poly = $("shapePoly");
+  if (!shape) { poly.setAttribute("points", ""); return; }
+  const colr = shape.remove ? "#ef6b6b" : "#ff3df2";
+  poly.setAttribute("points", shapeOutline().map(p => p.join(",")).join(" "));
+  poly.setAttribute("stroke", colr); poly.setAttribute("stroke-width", 1.5);
+  poly.setAttribute("stroke-dasharray", shape.remove ? "5 4" : "");
+  poly.setAttribute("fill", colr); poly.setAttribute("fill-opacity", 0.12);
+}
+function insideTest() {
+  const pts = shapeOutline();
+  if (shape.kind === "box") {
+    const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+    return (x, y) => x >= x0 && x <= x1 && y >= y0 && y <= y1;
+  }
+  return (x, y) => {
+    let inside = false;
+    for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+      const [xi, yi] = pts[i], [xj, yj] = pts[j];
+      if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+    }
+    return inside;
+  };
+}
+function cellsInShape() {
+  const inside = insideTest(), out = [];
+  if (shape.where === "img") {
+    const L = imgLayout(), b = img.getBoundingClientRect();
+    for (let d = Math.floor(view.c0); d < Math.ceil(view.c0 + view.cols); d++) {
+      const x = b.left + (d - view.c0 + 0.5) * L.cw;
+      for (let dr = 0; dr < R; dr++)
+        if (inside(x, b.top + L.y0 + (dr + 0.5) * L.ch)) out.push(rowOfDisp(dr) * C + colOfDisp(d));
+    }
+  } else if (mvp && pick.pos) {
+    const b = glc.getBoundingClientRect();
+    for (let i = 0; i < pick.cells.length; i++) {
+      const s = project(i, b);
+      if (s && inside(b.left + s[0], b.top + s[1])) out.push(pick.cells[i]);
+    }
+  }
+  return [...new Set(out)].filter(selectable);
+}
+function endShape(e) {
+  const s = shape;
+  if (s.moved < 4) {                                  // a click: behave like the point tool
+    shape = null; drawShape();
+    const c = s.where === "img" ? cellAt(e) : pickAt(e);
+    if (c >= 0 && selectable(c)) { pushUndo(); setSel(c, !sel.has(c)); focus = c; redraw(); }
+    return;
+  }
+  const cells = cellsInShape().filter(c => sel.has(c) === s.remove);
+  shape = null; drawShape();
+  if (ui.tool === "point") { /* one-off shape */ } else ui.lastShape = s.kind;
+  if (!cells.length) { toast(s.remove ? "No selected points inside" : "Nothing new inside"); return; }
+  pushUndo();
+  for (const c of cells) setSel(c, !s.remove);
+  toast(`${s.remove ? "Removed" : "Selected"} ${cells.length} point${cells.length === 1 ? "" : "s"}`);
+  redraw();
+}
+function setTool(t) {
+  ui.tool = t; if (t !== "point") ui.lastShape = t; saveUi();
+  document.querySelectorAll("#tools button").forEach(b => b.classList.toggle("on", b.dataset.tool === t));
+  $("toolHint").textContent = t === "point" ? "Shift+drag selects an area, Ctrl+drag removes one"
+    : "drag selects, Ctrl+drag removes · orbit 3D with Alt+drag or the middle button";
+  glc.style.cursor = t === "point" ? "" : "crosshair";
+}
+
+// ── 3D view ──────────────────────────────────────────────────────────────
+const glc = $("gl");
+const gl = glc.getContext("webgl", {antialias: true});
+let prog, buf = {}, npts = 0, nlines = 0, pick = {cells: [], pos: null}, mvp = null, orbit = null;
+function initGL() {
+  if (!gl) { $("empty").textContent = "WebGL is not available in this browser."; return; }
+  const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+  prog = gl.createProgram();
+  gl.attachShader(prog, sh(gl.VERTEX_SHADER, `
+    attribute vec3 p; attribute vec3 c; attribute float s; uniform mat4 m; uniform float dpr;
+    varying vec3 vc;
+    void main() { gl_Position = m * vec4(p, 1.0); gl_PointSize = s * dpr; vc = c; }`));
+  gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, `
+    precision mediump float; varying vec3 vc; uniform float round;
+    void main() {
+      if (round > 0.5) { vec2 d = gl_PointCoord - 0.5; if (dot(d, d) > 0.25) discard; }
+      gl_FragColor = vec4(vc, 1.0); }`));
+  gl.linkProgram(prog); gl.useProgram(prog);
+  for (const k of ["p", "c", "s", "lp", "lc"]) buf[k] = gl.createBuffer();
+  gl.enable(gl.DEPTH_TEST);
+}
+function mul(a, b) {                     // column-major 4x4
+  const o = new Float32Array(16);
+  for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+    let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + j] * b[i * 4 + k];
+    o[i * 4 + j] = s;
+  }
+  return o;
+}
+function camera() {
+  const w = glc.clientWidth, h = glc.clientHeight, t = cam.target;
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  const eye = [t[0] + cam.dist * cp * Math.cos(cam.yaw), t[1] + cam.dist * cp * Math.sin(cam.yaw), t[2] + cam.dist * sp];
+  const norm = v => { const l = Math.hypot(...v) || 1; return v.map(x => x / l); };
+  const cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+  const f = norm([t[0]-eye[0], t[1]-eye[1], t[2]-eye[2]]);
+  const s = norm(cross(f, [0, 0, 1])), u = cross(s, f);
+  const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+  const V = new Float32Array([s[0], u[0], -f[0], 0, s[1], u[1], -f[1], 0, s[2], u[2], -f[2], 0,
+                              -dot(s, eye), -dot(u, eye), dot(f, eye), 1]);
+  const fov = 1 / Math.tan(0.4), near = Math.max(0.02, cam.dist / 50), far = cam.dist * 30 + 100;
+  const P = new Float32Array([fov / (w / h), 0, 0, 0, 0, fov, 0, 0,
+                              0, 0, (far + near) / (near - far), -1, 0, 0, 2 * far * near / (near - far), 0]);
+  return {m: mul(P, V), right: s, up: u};
+}
+function xyz(c, rangeMm, out, o) {
+  const d = geom.dir, r = rangeMm / 1000;
+  let x = d[c * 3] * r, y = d[c * 3 + 1] * r, z = d[c * 3 + 2] * r;
+  if ($("base").checked && scan.rot) {
+    const m = scan.rot;
+    [x, y, z] = [m[0]*x + m[1]*y + m[2]*z, m[3]*x + m[4]*y + m[5]*z, m[6]*x + m[7]*y + m[8]*z];
+  }
+  out[o] = x; out[o + 1] = y; out[o + 2] = z;
+}
+function buildPoints() {
+  if (!gl || !scan) { npts = 0; return; }
+  const maxr = parseFloat($("maxr").value) * 1000, size = parseFloat($("psize").value);
+  const P = [], Cc = [], S = [], cells = [], tmp = [0, 0, 0];
+  if ($("ctx").checked) for (const k in scan.ctx) {
+    const rg = scan.ctx[k];
+    for (let c = 0; c < N; c++) if (rg[c] > 0 && rg[c] <= maxr) {
+      xyz(c, rg[c], tmp, 0); P.push(...tmp); Cc.push(0.3, 0.33, 0.38); S.push(size * 0.55);
+    }
+  }
+  const ctxCount = S.length;
+  for (let c = 0; c < N; c++) {
+    const r = scan.range[c];
+    if (!(r > 0) || (r > maxr && !sel.has(c))) continue;
+    xyz(c, r, tmp, 0); P.push(...tmp); cells.push(c);
+    if (c === focus) { Cc.push(1, 1, 1); S.push(size * 2.6); }
+    else if (sel.has(c)) { Cc.push(1, 0.24, 0.95); S.push(size * 2.0); }
+    else if (isProp(c)) { Cc.push(1, 0.62, 0.18); S.push(size * 1.8); }
+    else if (c === hover) { Cc.push(1, 1, 1); S.push(size * 1.6); }
+    else { Cc.push(...cellColour(c)); S.push(size); }
+  }
+  npts = S.length;
+  pick = {cells, pos: new Float32Array(P.slice(ctxCount * 3))};
+  const up = (b, a) => { gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(a), gl.DYNAMIC_DRAW); };
+  up(buf.p, P); up(buf.c, Cc); up(buf.s, S);
+  // scale rings at 0.5, 1 and 2 m and the sensor axes (x red, y green, z blue)
+  const LP = [], LC = [];
+  for (const rad of [0.5, 1, 2]) for (let a = 0; a < 72; a++) {
+    for (const b of [a, a + 1]) { LP.push(rad * Math.cos(b * Math.PI / 36), rad * Math.sin(b * Math.PI / 36), 0); LC.push(0.2, 0.23, 0.27); }
+  }
+  for (const [ax, colr] of [[[0.25, 0, 0], [0.9, 0.3, 0.3]], [[0, 0.25, 0], [0.3, 0.8, 0.3]], [[0, 0, 0.25], [0.35, 0.5, 1]]]) {
+    LP.push(0, 0, 0, ...ax); LC.push(...colr, ...colr);
+  }
+  nlines = LP.length / 3; up(buf.lp, LP); up(buf.lc, LC);
+}
+function drawGL() {
+  if (!gl) return;
+  const dpr = window.devicePixelRatio || 1, w = glc.clientWidth, h = glc.clientHeight;
+  if (glc.width !== Math.round(w * dpr) || glc.height !== Math.round(h * dpr)) { glc.width = Math.round(w * dpr); glc.height = Math.round(h * dpr); }
+  gl.viewport(0, 0, glc.width, glc.height);
+  gl.clearColor(0.055, 0.065, 0.08, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  if (!scan) return;
+  mvp = camera().m;
+  gl.uniformMatrix4fv(gl.getUniformLocation(prog, "m"), false, mvp);
+  gl.uniform1f(gl.getUniformLocation(prog, "dpr"), dpr);
+  const attr = (name, b, n) => { const l = gl.getAttribLocation(prog, name); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, n, gl.FLOAT, false, 0, 0); return l; };
+  const sl = gl.getAttribLocation(prog, "s");
+  attr("p", buf.lp, 3); attr("c", buf.lc, 3); gl.disableVertexAttribArray(sl); gl.vertexAttrib1f(sl, 1);
+  gl.uniform1f(gl.getUniformLocation(prog, "round"), 0); gl.drawArrays(gl.LINES, 0, nlines);
+  attr("p", buf.p, 3); attr("c", buf.c, 3); attr("s", buf.s, 1);
+  gl.uniform1f(gl.getUniformLocation(prog, "round"), 1); gl.drawArrays(gl.POINTS, 0, npts);
+}
+function project(i, b) {                 // screen position of pick point i, or null behind the camera
+  const x = pick.pos[i*3], y = pick.pos[i*3+1], z = pick.pos[i*3+2];
+  const w = mvp[3]*x + mvp[7]*y + mvp[11]*z + mvp[15];
+  if (w <= 0) return null;
+  return [((mvp[0]*x + mvp[4]*y + mvp[8]*z + mvp[12]) / w * 0.5 + 0.5) * b.width,
+          (0.5 - (mvp[1]*x + mvp[5]*y + mvp[9]*z + mvp[13]) / w * 0.5) * b.height, w];
+}
+function pickAt(ev) {
+  if (!mvp || !pick.pos) return -1;
+  const b = glc.getBoundingClientRect(), mx = ev.clientX - b.left, my = ev.clientY - b.top;
+  let best = -1, bestD = 14 * 14, bestZ = 1e9;
+  for (let i = 0; i < pick.cells.length; i++) {
+    const s = project(i, b);
+    if (!s) continue;
+    const d = (s[0] - mx) ** 2 + (s[1] - my) ** 2;
+    // nearest on screen; among near-ties prefer the point closer to the camera
+    if (d < bestD - 9 || (d < bestD + 9 && d < 14 * 14 && s[2] < bestZ)) { best = i; bestD = d; bestZ = s[2]; }
+  }
+  return best < 0 ? -1 : pick.cells[best];
+}
+function pointOf(c) { const o = [0, 0, 0]; xyz(c, scan.range[c], o, 0); return o; }
+glc.addEventListener("contextmenu", e => e.preventDefault());
+glc.addEventListener("mousedown", e => {
+  if (e.button === 0 && scan && wantsShape(e)) { startShape(e, "gl"); return; }
+  e.preventDefault();
+  orbit = {x: e.clientX, y: e.clientY, pan: e.button === 2, click: e.button === 0 && !e.altKey, moved: 0,
+           yaw: cam.yaw, pitch: cam.pitch, target: [...cam.target]};
+});
+glc.addEventListener("mousemove", e => {
+  if (shape) return;
+  if (orbit) {
+    const dx = e.clientX - orbit.x, dy = e.clientY - orbit.y;
+    orbit.moved = Math.max(orbit.moved, Math.abs(dx) + Math.abs(dy));
+    if (orbit.pan) {
+      const {right, up} = camera(), k = cam.dist / glc.clientHeight * 0.85;
+      cam.target = orbit.target.map((v, i) => v - right[i] * dx * k + up[i] * dy * k);
+    } else {
+      cam.yaw = orbit.yaw - dx * 0.006;
+      cam.pitch = Math.max(-1.55, Math.min(1.55, orbit.pitch + dy * 0.006));
+    }
+    drawGL(); return;
+  }
+  if (!scan) return;
+  const c = pickAt(e);
+  if (c !== hover) { hover = c; redraw(); }
+});
+glc.addEventListener("mouseup", e => {
+  if (orbit && orbit.moved < 4 && orbit.click && scan) {
+    const c = pickAt(e);
+    if (c >= 0 && selectable(c)) { pushUndo(); setSel(c, !sel.has(c)); focus = c; revealInImage(c); redraw(); }
+  }
+  orbit = null;
+});
+glc.addEventListener("dblclick", e => { const c = pickAt(e); if (c >= 0) { cam.target = pointOf(c); drawGL(); } });
+glc.addEventListener("mouseleave", () => { hover = -1; redraw(); });
+glc.addEventListener("wheel", e => { e.preventDefault(); cam.dist = Math.max(0.15, Math.min(120, cam.dist * (e.deltaY > 0 ? 1.12 : 0.89))); drawGL(); }, {passive: false});
+
+// ── selection and focus ──────────────────────────────────────────────────
+function setSel(c, on) {
+  if (on === sel.has(c)) return;
+  on ? sel.add(c) : sel.delete(c);
+  dirty = true;
+}
+function pushUndo() { undoStack.push([...sel]); if (undoStack.length > 100) undoStack.shift(); }
+function undo() {
+  if (!scan || !undoStack.length) { toast("Nothing to undo in this scan"); return; }
+  sel = new Set(undoStack.pop()); dirty = true; redraw();
+}
+function candidates() {
+  const out = [];
+  for (let c = 0; c < N; c++) if (sel.has(c) || isProp(c)) out.push(c);
+  return out.sort((a, b) => dispOfCol(a % C) - dispOfCol(b % C) || a - b);     // left to right as shown
+}
+function revealInImage(c) {
+  if (view.cols >= C) return;
+  const rel = dispNear(c % C) - view.c0;
+  if (rel < 2 || rel > view.cols - 3) view.c0 = dispOfCol(c % C) - view.cols / 2;
+}
+function focusOn(c) {
+  focus = c;
+  if (view.cols > 90) view.cols = 90;
+  view.c0 = dispOfCol(c % C) - view.cols / 2;
+  cam.target = pointOf(c);
+  cam.dist = Math.min(cam.dist, Math.max(1.2, scan.range[c] / 1000 * 1.6));
+  redraw();
+}
+function stepFocus(d) {
+  const cs = candidates();
+  if (!cs.length) { toast("No proposals or selections in this scan"); return; }
+  const k = cs.indexOf(focus);
+  focusOn(cs[k < 0 ? (d > 0 ? 0 : cs.length - 1) : (k + d + cs.length) % cs.length]);
+}
+
+// ── drawing everything ───────────────────────────────────────────────────
+let redrawPending = false;
+function redraw() {
+  if (redrawPending) return;
+  redrawPending = true;
+  requestAnimationFrame(() => { redrawPending = false; drawImage(); buildPoints(); drawGL(); drawHud(); drawTop(); });
+}
+function describe(c) {
+  const r = Math.floor(c / C), col = c % C, rg = scan.range[c];
+  if (!(rg > 0)) return `ring ${r} · az ${+(col * colDeg - 180).toFixed(1)}° · no return`;
+  let s = `ring ${r} · az ${+(col * colDeg - 180).toFixed(1)}° · ${(rg / 1000).toFixed(3)} m`;
+  if (rg < minR()) return s + " · too near, never classified";
+  if (scan.prob) s += ` · p ${(scan.prob[c] / 255).toFixed(2)}`;
+  if (scan.intensity) s += ` · intensity ${scan.intensity[c]}`;
+  if (sel.has(c)) s += " · SELECTED";
+  return s;
+}
+function drawHud() {
+  if (!scan) { $("hud").textContent = ""; return; }
+  const lines = [];
+  if (focus >= 0) lines.push("focus  " + describe(focus));
+  if (hover >= 0 && hover !== focus) lines.push("hover  " + describe(hover));
+  $("hud").innerHTML = lines.map(l => `<div>${l}</div>`).join("");
+}
+function drawTop() {
+  $("empty").style.display = scan ? "none" : "flex";
+  $("shiftV").textContent = Math.round(ui.shift * colDeg) + "°";
+  if (!scan) return;
+  $("where").textContent = `${bagTitle(bag, true)} · scan ${scan.i + 1} / ${scan.n} · ${scan.t.toFixed(2)} s`;
+  const st = $("status");
+  if (!scan.reviewed) { st.textContent = "not reviewed"; st.className = "chip"; }
+  else if (scan.complete === true) { st.textContent = "complete"; st.className = "chip complete"; }
+  else if (scan.complete === false) { st.textContent = "partial"; st.className = "chip partial"; }
+  else { st.textContent = "reviewed, completeness not marked"; st.className = "chip partial"; }
+  $("dirty").style.display = dirty ? "" : "none";
+  let np = 0; if (scan.prob) for (let c = 0; c < N; c++) if (isProp(c)) np++;
+  $("counts").textContent = `${sel.size} selected · ${np} proposed` + (scan.model ? "" : " · no model");
+  $("thrV").textContent = thr().toFixed(2);
+  $("maxrV").textContent = $("maxr").value + " m";
+  $("undo").disabled = !undoStack.length;
+}
+function drawTicks() {
+  const cv = $("ticks"), w = cv.clientWidth, x = cv.getContext("2d");
+  cv.width = w; cv.height = 8; x.clearRect(0, 0, w, 8);
+  if (!scan) return;
+  const px = i => 8 + (w - 16) * i / Math.max(1, scan.n - 1);
+  x.fillStyle = "#4da3ff"; for (const q of queue) x.fillRect(px(q.i) - 1, 5, 2, 3);
+  for (const i in reviewed) {
+    x.fillStyle = reviewed[i][1] === 1 ? "#4cc38a" : "#e5c14a";
+    x.fillRect(px(+i) - 1, 0, 2, 5);
+  }
+}
+
+// ── loading and saving ───────────────────────────────────────────────────
+async function loadScan(i, keepView) {
+  if (!bag) return;
+  if (dirty) await save(scan.complete === true);      // keep what was done
+  const seq = ++loadSeq;
+  let s;
+  try { s = await api(`/api/scan?bag=${encodeURIComponent(bag)}&i=${i}&ctx=2`); }
+  catch (e) { toast(e.message, 4000); return; }
+  if (seq !== loadSeq) return;
+  scan = s;
+  sel = new Set(s.selections.map(([r, c]) => r * C + c)); undoStack = [];
+  dirty = false; focus = -1; hover = -1;
+  if (!keepView) { view.c0 = 0; view.cols = C; }
+  $("scrub").max = s.n - 1; $("scrub").value = s.i;
+  redraw(); drawTicks(); drawQueue();
+}
+async function save(complete) {
+  if (!scan) return;
+  const body = {bag, i: scan.i, complete, selections: [...sel].map(c => [Math.floor(c / C), c % C])};
+  try { await api("/api/save", body); }
+  catch (e) { toast("Save failed: " + e.message, 5000); throw e; }
+  scan.reviewed = true; scan.complete = complete; dirty = false;
+  reviewed[scan.i] = [sel.size, complete ? 1 : 0];
+  queue = queue.filter(q => Math.abs(q.i - scan.i) >= 40);
+  drawTicks(); drawTop(); drawQueue(); refreshState(); loadAccSoon();
+}
+async function completeAndNext() {
+  if (!scan) return;
+  await save(true);
+  toast(`Saved complete with ${sel.size} label${sel.size === 1 ? "" : "s"}`);
+  if (ui.after === "unconfirmed") nextUnconfirmed();
+  else if (ui.after === "scan") { if (scan.i + 1 < scan.n) loadScan(scan.i + 1, true); }
+  else nextInQueue();
+}
+// Reviewed scans that are not marked complete (unmarked scans, partial saves), in timeline order.
+function nextUnconfirmed() {
+  const todo = Object.keys(reviewed).map(Number).filter(i => reviewed[i][1] !== 1 && i !== scan.i).sort((a, b) => a - b);
+  if (!todo.length) { toast("Every reviewed scan of this bag is confirmed", 3500); return; }
+  loadScan(todo.find(i => i > scan.i) ?? todo[0], true);
+}
+function stepReviewed(d) {
+  if (!scan) return;
+  const all = Object.keys(reviewed).map(Number).sort((a, b) => a - b);
+  const i = d > 0 ? all.find(i => i > scan.i) : all.filter(i => i < scan.i).pop();
+  if (i == null) toast(d > 0 ? "No reviewed scan after this one" : "No reviewed scan before this one"); else loadScan(i, true);
+}
+function nextInQueue() {
+  if (!scan) return;
+  if (queue.length) loadScan(queue[0].i);
+  else if (scan.i + 1 < scan.n) loadScan(scan.i + 1, true);
+}
+async function selectBag(name) {
+  if (dirty) await save(scan.complete === true);
+  bag = name; scan = null; queue = []; reviewed = {}; acc = null;
+  renderBags(); renderAcc();
+  try { reviewed = await api(`/api/reviewed?bag=${encodeURIComponent(name)}`); } catch (e) {}
+  const firstReviewed = Object.keys(reviewed).map(Number).sort((a, b) => a - b)[0];
+  await loadScan(firstReviewed ?? 0);
+  loadQueue(); loadAccSoon(0);
+}
+let queueTimer;
+async function loadQueue() {
+  clearTimeout(queueTimer);
+  if (!bag) return;
+  const forBag = bag;
+  let q;
+  try { q = await api(`/api/queue?bag=${encodeURIComponent(bag)}`); } catch (e) { return; }
+  if (forBag !== bag) return;
+  if (q.status === "ready") { queue = q.items; drawQueue(); drawTicks(); }
+  else {
+    queue = []; $("queueCnt").textContent = "";
+    $("queue").textContent = q.status === "computing" ? "Scoring this bag with the current model…"
+      : q.status === "no model" ? "Train a model to get suggestions." : "Bag is still being cached…";
+    if (q.status !== "no model") queueTimer = setTimeout(loadQueue, 2500);
+  }
+}
+function drawQueue() {
+  if (!bag) return;
+  const el = $("queue");
+  $("queueCnt").textContent = queue.length ? queue.length + " scans" : "";
+  if (!queue.length) { if (scan && el.dataset.ready) el.textContent = "Nothing left to suggest."; return; }
+  el.dataset.ready = 1;
+  el.innerHTML = `<div style="margin-bottom:4px">Scans the model is least sure about, at least 2 s apart
+    and away from reviewed ones.</div>` +
+    queue.slice(0, 14).map(q => `<div class="q num ${scan && q.i === scan.i ? "cur" : ""}" data-i="${q.i}">
+      <span>scan ${q.i + 1}</span><span>${q.uncertain} unsure · ${q.flagged} flagged</span></div>`).join("");
+  el.querySelectorAll(".q").forEach(d => d.onclick = () => loadScan(+d.dataset.i));
+}
+
+// ── charts ───────────────────────────────────────────────────────────────
+function niceTicks(lo, hi, n) {
+  const span = hi - lo || 1, raw = span / n, mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw);
+  const out = [];
+  for (let v = Math.ceil(lo / step - 1e-9) * step; v <= hi + 1e-9; v += step) out.push(+v.toFixed(10));
+  return out;
+}
+const tip = $("tip");
+function showTip(ev, html) {
+  tip.innerHTML = html; tip.style.display = "block";
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  tip.style.left = Math.min(window.innerWidth - w - 8, ev.clientX + 14) + "px";
+  tip.style.top = Math.max(4, ev.clientY - h - 10) + "px";
+}
+const hideTip = () => tip.style.display = "none";
+const chartSig = new WeakMap();
+// o: {series: [{name, color, points: [[x, y]], thin, dash}], x: {label, domain, fmt}, y: {label, domain, fmt},
+//     h, marker: {x, label}, legend, endLabels}
+function lineChart(el, o) {
+  const w = el.clientWidth || 300, sig = JSON.stringify([o, w]);
+  if (chartSig.get(el) === sig) return;
+  chartSig.set(el, sig);
+  const h = o.h || 190, m = {l: 40, r: o.endLabels ? 88 : 12, t: 8, b: 32};
+  const all = o.series.flatMap(s => s.points);
+  if (!all.length) { el.innerHTML = `<div class="small" style="padding:20px 0">${o.empty || "No data yet."}</div>`; return; }
+  const xd = o.x.domain || [Math.min(...all.map(p => p[0])), Math.max(...all.map(p => p[0]))];
+  const yd = o.y.domain || (() => { const lo = Math.min(...all.map(p => p[1])), hi = Math.max(...all.map(p => p[1])), pad = (hi - lo) * 0.08 || 0.02; return [lo - pad, hi + pad]; })();
+  const X = v => m.l + (w - m.l - m.r) * (v - xd[0]) / (xd[1] - xd[0] || 1);
+  const Y = v => h - m.b - (h - m.t - m.b) * (v - yd[0]) / (yd[1] - yd[0] || 1);
+  const xf = o.x.fmt || (v => v), yf = o.y.fmt || (v => v);
+  let s = `<svg class="chart" viewBox="0 0 ${w} ${h}" height="${h}">`;
+  for (const t of niceTicks(yd[0], yd[1], 4)) s += `<line class="grid" x1="${m.l}" x2="${w - m.r}" y1="${Y(t)}" y2="${Y(t)}"/><text x="${m.l - 6}" y="${Y(t) + 3.5}" text-anchor="end">${yf(t)}</text>`;
+  for (const t of (o.x.ticks || niceTicks(xd[0], xd[1], Math.max(2, Math.floor(w / 90))))) s += `<text x="${X(t)}" y="${h - m.b + 14}" text-anchor="middle">${xf(t)}</text>`;
+  s += `<text x="${(m.l + w - m.r) / 2}" y="${h - 3}" text-anchor="middle">${o.x.label || ""}</text>`;
+  if (o.marker && o.marker.x >= xd[0] && o.marker.x <= xd[1])
+    s += `<line x1="${X(o.marker.x)}" x2="${X(o.marker.x)}" y1="${m.t}" y2="${h - m.b}" stroke="#8a94a3" stroke-dasharray="3 3"/><text x="${X(o.marker.x) + 4}" y="${m.t + 9}">${o.marker.label}</text>`;
+  for (const sr of o.series) {
+    if (!sr.points.length) continue;
+    s += `<path d="M${sr.points.map(p => `${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("L")}" fill="none" stroke="${sr.color}" stroke-width="${sr.thin ? 1.2 : 2}" ${sr.thin ? 'opacity="0.75"' : ""} ${sr.dash ? `stroke-dasharray="${sr.dash}"` : ""} stroke-linejoin="round"/>`;
+    if (sr.points.length === 1) s += `<circle cx="${X(sr.points[0][0])}" cy="${Y(sr.points[0][1])}" r="4" fill="${sr.color}"/>`;
+    if (o.endLabels) { const p = sr.points[sr.points.length - 1]; s += `<text x="${X(p[0]) + 6}" y="${Y(p[1]) + 3.5}">${sr.name}</text>`; }
+  }
+  s += `<g class="hov" style="display:none"><line y1="${m.t}" y2="${h - m.b}" stroke="#8a94a3"/></g><rect class="hit" x="${m.l}" y="${m.t}" width="${w - m.l - m.r}" height="${h - m.t - m.b}" fill="transparent"/></svg>`;
+  const legend = o.legend && o.series.length > 1 ? `<div class="legendrow">${o.series.map(sr => `<span><i style="background:${sr.color}"></i>${sr.name}</span>`).join("")}</div>` : "";
+  el.innerHTML = legend + s;
+  const svg = el.querySelector("svg"), hov = svg.querySelector(".hov"), xs = [...new Set(all.map(p => p[0]))].sort((a, b) => a - b);
+  svg.querySelector(".hit").addEventListener("mousemove", ev => {
+    const b = svg.getBoundingClientRect(), vx = xd[0] + ((ev.clientX - b.left) * w / b.width - m.l) / (w - m.l - m.r) * (xd[1] - xd[0]);
+    const x = xs.reduce((a, c) => Math.abs(c - vx) < Math.abs(a - vx) ? c : a);
+    hov.style.display = ""; hov.querySelector("line").setAttribute("x1", X(x)); hov.querySelector("line").setAttribute("x2", X(x));
+    hov.querySelectorAll("circle").forEach(c => c.remove());
+    const rows = [];
+    for (const sr of o.series) {
+      const p = sr.points.find(p => p[0] === x);
+      if (!p) continue;
+      hov.insertAdjacentHTML("beforeend", `<circle cx="${X(x)}" cy="${Y(p[1])}" r="4" fill="${sr.color}" stroke="#1b1f25" stroke-width="2"/>`);
+      rows.push(`<div><i style="background:${sr.color}"></i>${sr.name}: <b>${(o.y.tip || yf)(p[1])}</b></div>`);
+    }
+    showTip(ev, `<div class="small">${(o.x.tip || xf)(x)}</div>` + rows.join(""));
+  });
+  svg.querySelector(".hit").addEventListener("mouseleave", () => { hov.style.display = "none"; hideTip(); });
+}
+// o: {values, color, h, xLabel, tick(i), tip(i, v)}
+function barChart(el, o) {
+  const w = el.clientWidth || 300, sig = JSON.stringify([o.values, w, o.h]);
+  if (chartSig.get(el) === sig) return;
+  chartSig.set(el, sig);
+  const h = o.h || 120, m = {l: 40, r: 8, t: 6, b: 30}, n = o.values.length, max = Math.max(1, ...o.values);
+  const bw = (w - m.l - m.r) / n, Y = v => h - m.b - (h - m.t - m.b) * v / max;
+  let s = `<svg class="chart" viewBox="0 0 ${w} ${h}" height="${h}">`;
+  for (const t of niceTicks(0, max, 3)) s += `<line class="grid" x1="${m.l}" x2="${w - m.r}" y1="${Y(t)}" y2="${Y(t)}"/><text x="${m.l - 6}" y="${Y(t) + 3.5}" text-anchor="end">${t}</text>`;
+  o.values.forEach((v, i) => {
+    const x = m.l + i * bw + 1, y = Y(v), bh = h - m.b - y;
+    if (v > 0) s += `<path d="M${x},${h - m.b}V${y + Math.min(2, bh)}q0,-${Math.min(2, bh)} 2,-${Math.min(2, bh)}H${x + bw - 4}q2,0 2,${Math.min(2, bh)}V${h - m.b}Z" fill="${o.color}"/>`;
+    s += `<rect class="hit" data-i="${i}" x="${m.l + i * bw}" y="${m.t}" width="${bw}" height="${h - m.t - m.b}" fill="transparent"/>`;
+    const t = o.tick(i); if (t != null) s += `<text x="${m.l + i * bw}" y="${h - m.b + 14}" text-anchor="middle">${t}</text>`;
+  });
+  s += `<text x="${(m.l + w - m.r) / 2}" y="${h - 3}" text-anchor="middle">${o.xLabel || ""}</text></svg>`;
+  el.innerHTML = s;
+  el.querySelectorAll(".hit").forEach(r => {
+    r.addEventListener("mousemove", ev => showTip(ev, o.tip(+r.dataset.i, o.values[+r.dataset.i])));
+    r.addEventListener("mouseleave", hideTip);
+  });
+}
+const css1 = "#3987e5", css2 = "#d95926", css3 = "#199e70", css4 = "#c98500";
+const VNAME = {xyz: "range only", full: "with intensity"};
+
+// ── sidebar ──────────────────────────────────────────────────────────────
+function renderBags() {
+  if (!state) return;
+  $("bagsCnt").textContent = state.bags.length || "";
+  $("bags").innerHTML = state.bags.map(b => {
+    const d = bagDate(b), when = fmtWhen(d);
+    const other = b.reviewed - b.complete;
+    const denom = Math.max(1, b.reviewed, 60);
+    return `<div class="bag ${b.name === bag ? "cur" : ""}" data-n="${esc(b.name)}" title="${esc(b.path)}&#10;topic ${esc(b.topic)}">
+      <div class="acts"><button class="mini" data-act="label" title="Name this bag">✎</button><button class="mini danger" data-act="remove" title="Take off the list">✕</button></div>
+      <div class="ttl">${esc(b.label || when || b.name)}${b.intensity ? '<span class="tag">intensity</span>' : ""}</div>
+      ${b.label && when ? `<div class="meta">${when}</div>` : ""}
+      <div class="meta num">${b.cached ? `${fmtDur(b.seconds)} · ${b.n} scans` : "caching…"}${b.mb != null ? ` · ${fmtBytes(b.mb * 1e6)}` : " · drive not mounted"}</div>
+      <div class="meta num">${b.reviewed ? `${b.complete} complete · ${other} other · ${b.labels} labels` : "not reviewed yet"}</div>
+      ${b.reviewed ? `<div class="bar2" title="${b.complete} complete, ${other} partial or unmarked"><i style="width:${100 * b.complete / denom}%;background:var(--ok)"></i><i style="width:${100 * other / denom}%;background:var(--warn);margin-left:2px"></i></div>` : ""}
+      <div class="file">${esc(b.folder)}</div>
+    </div>`; }).join("") || '<div class="small">No bags registered. Use Add…</div>';
+  document.querySelectorAll(".bag").forEach(d => {
+    const b = state.bags.find(x => x.name === d.dataset.n);
+    d.onclick = () => { if (b.cached) selectBag(b.name); else toast("Still caching this bag"); };
+    d.querySelector("[data-act=label]").onclick = e => { e.stopPropagation(); openBagSettings(b); };
+    d.querySelector("[data-act=remove]").onclick = async e => {
+      e.stopPropagation();
+      if (!confirm(`Take “${bagTitle(b.name)}” off the list?\n\nIts labels and scan cache are kept; you can add it again.`)) return;
+      try { await api("/api/bags/remove", {bag: b.name}); if (bag === b.name) { bag = null; scan = null; redraw(); } refreshState(); } catch (err) { toast(err.message, 4000); }
+    };
+  });
+  $("unreg").textContent = state.unregistered.length
+    ? "Ledger has labels for bags not registered: " + state.unregistered.join(", ") : "";
+}
+async function openBagSettings(b) {
+  openModal("m-bag");
+  $("bagSetPath").textContent = b.path; $("bagSetLabel").value = b.label || "";
+  const opt = (name, extra) => `<option value="${esc(name)}" ${name === b.topic ? "selected" : ""}>${esc(name)}${extra}</option>`;
+  $("bagSetTopic").innerHTML = opt(b.topic, "");
+  try { const ts = await api(`/api/topics?path=${encodeURIComponent(b.path)}`);
+    $("bagSetTopic").innerHTML = ts.map(t => opt(t.name, ` · ${t.count} scans`)).join("") || opt(b.topic, ""); } catch (e) {}
+  $("bagSetSave").onclick = async () => {
+    const topic = $("bagSetTopic").value;
+    try {
+      await api("/api/bags/label", {bag: b.name, label: $("bagSetLabel").value});
+      if (topic !== b.topic) {
+        if (!confirm(`Read this bag again from ${topic}?\n\nIts scan cache is rebuilt. Saved labels are kept as they are.`)) return;
+        if (bag === b.name) { if (dirty) await save(scan.complete === true); bag = null; scan = null; redraw(); }
+        await api("/api/bags/topic", {bag: b.name, topic}); toast("Reading the bag again…");
+      }
+      closeModals(); await refreshState(); drawTop();
+    } catch (err) { toast(err.message, 5000); }
+  };
+}
+function renderModel() {
+  const ms = Object.entries(state.models);
+  $("modelCnt").textContent = ms.length && ms[0][1].trained ? "trained " + fmtWhen(new Date(ms[0][1].trained), false) : "";
+  $("model").innerHTML = ms.length ? ms.map(([v, m]) => `
+    <div class="card"><h4 style="color:var(--text)">${v === "xyz" ? "Range only" : "With intensity"}</h4>
+      <div class="kv num"><span>complete scans / labels</span><span>${m.summary.train_scans} / ${m.summary.train_labels}</span>
+      <span>average precision</span><span>${f3(m.summary.cv_ap)}</span>
+      <span>precision / recall at 0.3</span><span>${pc(m.summary.cv_precision)} / ${pc(m.summary.cv_recall)}</span>
+      ${m.summary.partial_scans ? `<span>found in ${m.summary.partial_scans} partial scans</span><span>${pc(m.summary.partial_recall)}</span>` : ""}</div>
+    </div>`).join("") : "No model yet. Label some scans and train.";
+}
+function learnSeries(curves) {            // {fold: [[trees, value]]} or [[...], ...]
+  const list = Array.isArray(curves) ? curves.map((c, i) => [i + 1, c]) : Object.entries(curves || {});
+  return list.filter(([, c]) => c && c.length).map(([k, c]) => ({name: "fold " + k, color: css1, thin: true, points: c}));
+}
+function renderTraining() {
+  const job = state.jobs.find(j => j.kind === "train");
+  const el = $("trainLive");
+  if (!job || !job.progress) { el.innerHTML = ""; return; }
+  const p = job.progress, live = job.status === "running";
+  if (!el.dataset.built) {
+    el.innerHTML = `<div class="card"><h4 id="tlHead"></h4><div class="progress"><i id="tlBar"></i></div>
+      <div class="small" id="tlStage"></div><div id="tlRes" class="small num" style="margin-top:4px"></div><div id="tlChart" style="margin-top:4px"></div></div>`;
+    el.dataset.built = 1;
+  }
+  $("tlHead").innerHTML = `<span class="${job.status}">${live ? "Training" : "Last training " + job.status}</span> <span class="small num">${job.seconds} s${p.device ? " · " + (p.device === "cuda" ? "GPU" : "CPU") : ""}</span>`;
+  $("tlBar").style.width = Math.round(p.frac * 100) + "%";
+  $("tlStage").textContent = job.status === "failed" ? job.log.slice(-1)[0] || "failed" : p.stage;
+  $("tlRes").innerHTML = Object.entries(p.results).map(([v, r]) =>
+    `${VNAME[v]}: AP ${f3(r.ap)} · precision ${pc(r.precision)} · recall ${pc(r.recall)} at ${r.threshold}`).join("<br>");
+  const v = [...p.variants].reverse().find(v => p.curves[v]);
+  if (v) lineChart($("tlChart"), {series: learnSeries(p.curves[v]), h: 120,
+    x: {label: `trees (${VNAME[v]}, one line per held-out fold)`, domain: [0, p.rounds], tip: t => t + " trees"},
+    y: {fmt: t => t.toFixed(2), tip: t => t.toFixed(3)}});
+}
+const prAt = (curve, th) => { const r = curve && curve[Math.round(th / 0.02) - 1]; return r ? [r[1], r[2]] : [null, null]; };
+function renderAcc() {
+  const el = $("acc");
+  if (!bag) { el.textContent = "Select a bag."; $("accCnt").textContent = ""; return; }
+  if (!acc || acc.bag !== bag) { el.textContent = "Computing…"; return; }
+  if (!acc.model) { el.textContent = "No model yet."; return; }
+  const th = thr(), parts = [];
+  const head = `<div style="margin-bottom:6px">Model: ${VNAME[acc.variant]}, at threshold <b class="num">${th.toFixed(2)}</b></div>`;
+  if (acc.cv) {
+    const [p, r] = prAt(acc.cv.pr_curve, th);
+    $("accCnt").textContent = "AP " + f3(acc.cv.average_precision);
+    parts.push(`<div class="card"><h4 style="color:var(--text)">Held out during training</h4><div class="kv num">
+      <span>complete scans / labels</span><span>${acc.cv.n_scans} / ${acc.cv.n_artifact}</span>
+      <span>average precision</span><span>${f3(acc.cv.average_precision)}</span>
+      <span>precision</span><span>${pc(p)}</span><span>recall</span><span>${pc(r)}</span></div></div>`);
+  } else {
+    $("accCnt").textContent = "";
+    parts.push(`<div class="card">${acc.has_per_bag === false ? "The installed model was trained before per-bag numbers were recorded. Train once to get them."
+      : "No complete scan with labels from this bag was in the last training."}</div>`);
+  }
+  if (acc.partial) parts.push(`<div class="card"><h4 style="color:var(--text)">Partial scans at training</h4><div class="kv num">
+      <span>scans / labels</span><span>${acc.partial.n_scans} / ${acc.partial.n_artifact}</span>
+      <span>labels found</span><span>${pc(prAt(acc.partial.pr_curve, th)[1])}</span></div></div>`);
+  if (acc.fresh) {
+    const k = Math.round(th / 0.05) - 1, c = acc.fresh.complete, pa = acc.fresh.partial;
+    const row = d => d.rows[k] || [0, 0, 0];
+    if (c.scans + pa.scans === 0) parts.push(`<div class="card">No scans reviewed since the last training.</div>`);
+    else {
+      const [tp, fl, lab] = row(c), [tp2, , lab2] = row(pa);
+      parts.push(`<div class="card"><h4 style="color:var(--text)">Reviewed since training</h4><div class="kv num">
+        ${c.scans ? `<span>complete scans / labels</span><span>${c.scans} / ${lab}</span>
+        <span>precision</span><span>${fl ? pc(tp / fl) : "–"}</span><span>recall</span><span>${lab ? pc(tp / lab) : "–"}</span>
+        <span>flagged, not selected</span><span>${fl - tp}</span>` : ""}
+        ${pa.scans ? `<span>partial scans / labels</span><span>${pa.scans} / ${lab2}</span><span>labels found</span><span>${lab2 ? pc(tp2 / lab2) : "–"}</span>` : ""}
+        </div><div style="margin-top:4px">Never seen by the installed model.</div></div>`);
+    }
+  }
+  el.innerHTML = head + parts.join("") + `<button id="accCharts">Charts…</button>`;
+  $("accCharts").onclick = () => { $("statScope").value = "bag"; openStats(); };
+}
+let accTimer;
+function loadAccSoon(ms = 1500) {
+  clearTimeout(accTimer);
+  accTimer = setTimeout(async () => {
+    if (!bag || !($("sec-acc").open || $("m-stats").classList.contains("open"))) return;
+    const forBag = bag;
+    try { const a = await api(`/api/accuracy?bag=${encodeURIComponent(bag)}`); if (forBag === bag) { acc = a; renderAcc(); renderStats(); } }
+    catch (e) { $("acc").textContent = e.message; }
+  }, ms);
+}
+let jobSeen = {};
+function renderJobs() {
+  const run = state.jobs.filter(j => j.status === "running").length;
+  $("jobsCnt").innerHTML = run ? `<span class="running">${run} running</span>` : "";
+  $("jobs").innerHTML = state.jobs.length ? state.jobs.map(j => `
+    <div class="job"><span class="${j.status}">${j.status}</span> · ${j.kind} · ${esc(j.kind === "train" ? "models" : bagTitle(j.label, true))} · ${j.seconds} s
+      ${j.status !== "done" || j.kind === "train" || j.kind === "export" ? `<pre>${esc(j.log.slice(-8).join("\n"))}</pre>` : ""}</div>`).join("") : "None.";
+  for (const j of state.jobs) {
+    if (jobSeen[j.id] === "running" && j.status !== "running") {
+      if (j.kind !== "queue" || j.status !== "done") toast(`${j.kind} ${j.status}`, 3500);
+      if (j.kind === "train") { loadReports(); loadFiles(); }
+      if (j.kind === "train" && j.status === "done") { if (scan) loadScan(scan.i, true); loadQueue(); loadAccSoon(300); }
+      if (j.kind === "export") loadFiles();
+      if (j.kind === "cache") renderBags();
+    }
+    jobSeen[j.id] = j.status;
+  }
+  $("train").disabled = state.jobs.some(j => j.kind === "train" && j.status === "running");
+}
+async function refreshState() {
+  try { state = await api("/api/state"); } catch (e) { return; }
+  renderBags(); renderModel(); renderJobs(); renderTraining();
+  if ($("m-stats").classList.contains("open")) renderStats();
+}
+async function poll() {
+  await refreshState();
+  const fast = state && state.jobs.some(j => j.kind === "train" && j.status === "running");
+  setTimeout(poll, fast ? 700 : 2000);
+}
+
+// ── charts window ────────────────────────────────────────────────────────
+async function loadReports() { try { reports = await api("/api/reports"); renderStats(); } catch (e) {} }
+function openStats() {
+  if (acc && acc.bag === bag && !$("statVar").dataset.touched) $("statVar").value = acc.variant;
+  openModal("m-stats"); loadReports(); loadAccSoon(0); renderStats();
+}
+function renderStats() {
+  if (!$("m-stats").classList.contains("open") || !state) return;
+  const v = $("statVar").value, scope = $("statScope").value, rep = reports && reports[v], th = thr();
+  const job = state.jobs.find(j => j.kind === "train"), live = job && job.status === "running" && job.progress;
+  // learning curve
+  const curves = live && job.progress.curves[v] ? job.progress.curves[v] : rep && rep.learning_curves;
+  $("learnSub").textContent = (live ? `Training now: ${job.progress.stage}. ` : "") +
+    "Area under the precision-recall curve on the held-out part as trees are added; one line per fold. " +
+    "Flat at the right means more trees would not help; more labelled scans would.";
+  lineChart($("chLearn"), {series: learnSeries(curves), h: 230, empty: rep ? "The installed model was trained before curves were recorded. Train once to see them." : "No model of this kind.",
+    x: {label: "trees", domain: [0, live ? job.progress.rounds : 600], tip: t => t + " trees"}, y: {fmt: t => t.toFixed(2), tip: t => t.toFixed(3)}});
+  // precision / recall
+  const cv = rep && (scope === "bag" ? (rep.cross_validation.per_bag || {})[bag] : rep.cross_validation);
+  $("prSub").textContent = `Cross-validation, ${scope === "bag" ? "selected bag" : "all bags"}` +
+    (cv ? `: ${cv.n_scans} complete scans, ${cv.n_artifact} labels, average precision ${f3(cv.average_precision)}.` : ".") +
+    " Precision counts errors you never clicked as wrong, so it is a lower bound.";
+  const pr = cv && cv.pr_curve || [];
+  lineChart($("chPR"), {h: 230, legend: true, endLabels: true, empty: scope === "bag" ? "No cross-validation numbers for this bag (no complete labelled scans in the last training, or an older model)." : "Train once with this version to record the curve.",
+    series: [{name: "precision", color: css1, points: pr.map(r => [r[0], r[1]])}, {name: "recall", color: css2, points: pr.map(r => [r[0], r[2]])}],
+    x: {label: "threshold", domain: [0, 1], fmt: t => t.toFixed(1), tip: t => "threshold " + t.toFixed(2)}, y: {domain: [0, 1], fmt: pc},
+    marker: {x: th, label: "slider " + th.toFixed(2)}});
+  // history
+  const h = state.history;
+  const hs = k => h.map((e, i) => [i + 1, (e.models[k] || {}).cv_ap]).filter(p => p[1] != null);
+  lineChart($("chHist"), {h: 190, legend: true, endLabels: true, empty: "No training run recorded yet.",
+    series: [{name: "range only", color: css3, points: hs("xyz")}, {name: "with intensity", color: css4, points: hs("full")}],
+    x: {label: "training run", ticks: h.length <= 12 ? h.map((e, i) => i + 1) : undefined, fmt: t => Number.isInteger(t) ? t : "",
+        tip: t => { const e = h[t - 1]; return e ? `run ${t} · ${fmtWhen(parseStamp(e.time), false)}${e.restored_from ? " · restored" : ""}` : ""; }},
+    y: {fmt: t => t.toFixed(2), tip: t => t.toFixed(3)}});
+  $("histTable").innerHTML = h.length ? `<table><tr><th>Run</th><th>When</th><th>Scans</th><th>Labels</th><th>AP range only</th><th>AP intensity</th></tr>` +
+    h.map((e, i) => { const x = e.models.xyz || {}, f = e.models.full || {};
+      return `<tr class="num"><td>${i + 1}${e.restored_from ? " (restored)" : ""}</td><td>${fmtWhen(parseStamp(e.time), false)}</td>
+        <td>${x.train_scans ?? "–"}</td><td>${x.train_labels ?? "–"}</td><td>${f3(x.cv_ap)}</td><td>${f3(f.cv_ap)}</td></tr>`; }).reverse().join("") + "</table>" : "";
+  // by bag
+  const pb = rep && rep.cross_validation.per_bag, pp = rep && rep.partly_labelled_scans && rep.partly_labelled_scans.per_bag || {};
+  $("bagSub").textContent = `Cross-validation of the ${VNAME[v]} model, at threshold ${th.toFixed(2)}. Click a row to open the bag.`;
+  $("bagTable").innerHTML = pb ? `<table><tr><th>Bag</th><th>Scans</th><th>Labels</th><th>AP</th><th>Precision</th><th>Recall</th><th>Found in partial</th></tr>` +
+    Object.entries(pb).map(([n, d]) => { const [p, r] = prAt(d.pr_curve, th);
+      return `<tr class="num ${n === bag ? "cur" : ""}" data-n="${esc(n)}" style="cursor:pointer"><td>${esc(bagTitle(n, true))}</td><td>${d.n_scans}</td><td>${d.n_artifact}</td>
+        <td>${f3(d.average_precision)}</td><td>${pc(p)}</td><td>${pc(r)}</td><td>${pp[n] ? pc(prAt(pp[n].pr_curve, th)[1]) : "–"}</td></tr>`; }).join("") + "</table>"
+    : `<div class="small">${rep ? "Train once with this version to get per-bag numbers." : "No model of this kind."}</div>`;
+  $("bagTable").querySelectorAll("tr[data-n]").forEach(tr => tr.onclick = () => { const b = bagInfo(tr.dataset.n); if (b && b.cached) selectBag(b.name); });
+  // fresh + azimuth
+  const mine = acc && acc.bag === bag ? acc : null;
+  if (!bag) { $("freshBox").innerHTML = '<div class="small">Select a bag.</div>'; $("chAz").innerHTML = ""; return; }
+  if (!mine) { $("freshBox").innerHTML = '<div class="small">Computing…</div>'; return; }
+  if (!mine.fresh) $("freshBox").innerHTML = `<div class="small">${mine.model ? "The installed model does not record which scans it was trained on. Train once with this version." : "No model yet."}</div>`;
+  else {
+    const f = mine.fresh, k = Math.round(th / 0.05) - 1, [tp, fl, lab] = f.complete.rows[k], [tp2, , lab2] = f.partial.rows[k];
+    $("freshBox").innerHTML = (f.complete.scans + f.partial.scans === 0) ? '<div class="small">None yet for this bag.</div>' :
+      `<div class="kv num" style="max-width:340px"><span>complete scans / labels</span><span>${f.complete.scans} / ${lab}</span>
+       <span>precision at ${th.toFixed(2)}</span><span>${fl ? pc(tp / fl) : "–"}</span><span>recall at ${th.toFixed(2)}</span><span>${lab ? pc(tp / lab) : "–"}</span>
+       <span>partial scans / labels</span><span>${f.partial.scans} / ${lab2}</span><span>labels found in partial</span><span>${lab2 ? pc(tp2 / lab2) : "–"}</span></div><div id="chFresh"></div>`;
+    if (f.complete.scans && lab) lineChart($("chFresh"), {h: 170, legend: true, endLabels: true,
+      series: [{name: "precision", color: css1, points: f.thresholds.map((t, i) => [t, f.complete.rows[i][1] ? f.complete.rows[i][0] / f.complete.rows[i][1] : null]).filter(p => p[1] != null)},
+               {name: "recall", color: css2, points: f.thresholds.map((t, i) => [t, f.complete.rows[i][0] / lab])}],
+      x: {label: "threshold", domain: [0, 1], fmt: t => t.toFixed(1), tip: t => "threshold " + t.toFixed(2)}, y: {domain: [0, 1], fmt: pc}, marker: {x: th, label: ""}});
+  }
+  const az = scope === "bag" ? mine.azimuth.bag : mine.azimuth.all;
+  barChart($("chAz"), {values: az, color: css1, h: 170, xLabel: `azimuth (°), ${scope === "bag" ? "selected bag" : "all bags"}`,
+    tick: i => i % 6 === 0 ? i * 10 - 180 : null, tip: (i, val) => `<div class="small">${i * 10 - 180}° to ${i * 10 - 170}°</div><b>${val}</b> labels`});
+}
+
+// ── files ────────────────────────────────────────────────────────────────
+async function loadFiles() {
+  try { files = await api("/api/files"); } catch (e) { return; }
+  const mb = files.models.reduce((a, e) => a + e.bytes, 0), eb = files.exports.reduce((a, e) => a + e.bytes, 0);
+  $("filesCnt").textContent = fmtBytes(mb + eb);
+  $("filesSum").innerHTML = `<div class="kv num"><span>model sets</span><span>${files.models.length} · ${fmtBytes(mb)}</span>
+    <span>exports</span><span>${files.exports.length} · ${fmtBytes(eb)}</span></div>`;
+  if (!$("m-files").classList.contains("open")) return;
+  $("modelDir").textContent = files.model_dir; $("outDir").textContent = files.out_dir;
+  const when = t => fmtWhen(new Date(t * 1000), false);
+  $("filesModels").innerHTML = `<table><tr><th>Model set</th><th>Written</th><th>Size</th><th>Scans</th><th>Labels</th><th>AP range only</th><th>AP intensity</th><th></th></tr>` +
+    files.models.map(e => { const x = e.xyz || {}, f = e.full || {};
+      return `<tr class="num ${e.current ? "cur" : ""}"><td>${esc(e.name)}${e.current ? '<span class="tag" style="border-color:var(--ok);color:var(--ok)">in use</span>' : ""}</td>
+        <td>${when(e.mtime)}</td><td>${fmtBytes(e.bytes)}</td><td>${x.train_scans ?? "–"}</td><td>${x.train_labels ?? "–"}</td><td>${f3(x.cv_ap)}</td><td>${f3(f.cv_ap)}</td>
+        <td>${e.current ? "" : `${e.usable ? `<button class="mini" data-use="${esc(e.id)}">Use</button> ` : ""}<button class="mini danger" data-del="model" data-id="${esc(e.id)}" data-size="${e.bytes}">Delete</button>`}</td></tr>`; }).join("") + "</table>";
+  $("filesExports").innerHTML = files.exports.length ? `<table><tr><th>Export</th><th>Written</th><th>Size</th><th style="text-align:left">Contents</th><th></th></tr>` +
+    files.exports.map(e => `<tr class="num"><td>${esc(e.name)}${e.dir ? "/" : ""}</td><td>${when(e.mtime)}</td><td>${fmtBytes(e.bytes)}</td>
+      <td style="text-align:left">${e.runs.map(r => `${esc(bagTitle(r.bag, true))} · threshold ${r.threshold ?? "?"} · ${esc((r.model || "").replace(/artifact_|\.joblib/g, "").replace("xyz", "range only").replace("full", "with intensity"))}${r.flagged_fraction != null ? ` · ${(r.flagged_fraction * 100).toFixed(2)}% flagged` : ""}${r.has_bag ? "" : " · scores only, no bag"}`).join("<br>") || '<span class="small">no summary inside</span>'}</td>
+      <td>${e.busy ? '<span class="running">being written</span>' : `<button class="mini danger" data-del="export" data-id="${esc(e.id)}" data-size="${e.bytes}">Delete</button>`}</td></tr>`).join("") + "</table>"
+    : '<div class="small">No exports yet.</div>';
+  document.querySelectorAll("#m-files [data-del]").forEach(b => b.onclick = async () => {
+    if (!confirm(`Delete “${b.dataset.id}” (${fmtBytes(+b.dataset.size)})?\n\nThis cannot be undone.`)) return;
+    try { const r = await api("/api/files/delete", {kind: b.dataset.del, id: b.dataset.id}); toast(`Deleted, ${fmtBytes(r.freed)} freed`); } catch (e) { toast(e.message, 4000); }
+    loadFiles();
+  });
+  document.querySelectorAll("#m-files [data-use]").forEach(b => b.onclick = async () => {
+    if (!confirm(`Install the models from “${b.dataset.use}”?\n\nThe models in use now are kept under history.`)) return;
+    try { await api("/api/models/use", {id: b.dataset.use}); toast("Model installed"); } catch (e) { toast(e.message, 4000); return; }
+    await refreshState(); loadFiles(); loadReports(); loadQueue(); loadAccSoon(300); if (scan) loadScan(scan.i, true);
+  });
+}
+
+// ── modals ───────────────────────────────────────────────────────────────
+const anyModal = () => document.querySelector(".modal.open");
+function openModal(id) { document.querySelectorAll(".modal").forEach(m => m.classList.toggle("open", m.id === id)); }
+function closeModals() { document.querySelectorAll(".modal").forEach(m => m.classList.remove("open")); hideTip(); }
+document.querySelectorAll("[data-close]").forEach(b => b.onclick = closeModals);
+document.querySelectorAll(".modal").forEach(m => m.addEventListener("mousedown", e => { if (e.target === m) closeModals(); }));
+
+// ── controls ─────────────────────────────────────────────────────────────
+$("prev").onclick = () => scan && loadScan(scan.i - 1, true);
+$("next").onclick = () => scan && loadScan(scan.i + 1, true);
+$("accept").onclick = () => { if (!scan) return; pushUndo(); for (let c = 0; c < N; c++) if (isProp(c)) setSel(c, true); redraw(); };
+$("clear").onclick = () => { if (!scan || !sel.size) return; pushUndo(); dirty = true; sel.clear(); redraw(); };
+$("undo").onclick = undo;
+$("after").value = ui.after;
+$("after").oninput = () => { ui.after = $("after").value; saveUi(); $("after").blur(); };
+$("savePartial").onclick = async () => { if (scan) { await save(false); toast("Saved as not complete"); } };
+$("saveComplete").onclick = completeAndNext;
+let scrubTimer;
+$("scrub").oninput = e => { clearTimeout(scrubTimer); scrubTimer = setTimeout(() => loadScan(+e.target.value, true), 60); };
+for (const id of ["maxr", "psize", "ctx", "base"]) $(id).oninput = redraw;
+$("thr").oninput = () => { redraw(); renderAcc(); renderStats(); };
+$("colour").oninput = () => { ui.colour = $("colour").value; saveUi(); redraw(); };
+$("vflip").oninput = () => { ui.vflip = $("vflip").checked; saveUi(); redraw(); };
+$("hflip").oninput = () => { ui.hflip = $("hflip").checked; saveUi(); redraw(); };
+function setShift(v) { const h = Math.floor(C / 2); ui.shift = mod(Math.round(v) + h, C) - h; $("shift").value = ui.shift; saveUi(); redraw(); }
+$("shift").oninput = () => setShift(+$("shift").value);
+$("shift").ondblclick = () => setShift(0);
+document.querySelectorAll("#tools button").forEach(b => b.onclick = () => setTool(b.dataset.tool));
+$("refreshQueue").onclick = e => { e.preventDefault(); e.stopPropagation(); loadQueue(); };
+$("train").onclick = async () => {
+  if (dirty) await save(scan.complete === true);
+  try { await api("/api/train", {threshold: parseFloat($("trainThr").value)}); toast("Training started"); refreshState(); }
+  catch (e) { toast(e.message, 4000); }
+};
+$("chartsBtn").onclick = openStats;
+$("statVar").oninput = () => { $("statVar").dataset.touched = 1; renderStats(); };
+$("statScope").oninput = renderStats;
+$("export").onclick = async () => {
+  if (!bag) return toast("Select a bag first");
+  try { await api("/api/export", {bag, threshold: thr()}); toast(`Export started at threshold ${thr().toFixed(2)}`); $("sec-jobs").open = true; refreshState(); }
+  catch (e) { toast(e.message, 4000); }
+};
+$("filesBtn").onclick = () => { openModal("m-files"); loadFiles(); };
+$("filesRefresh").onclick = loadFiles;
+$("helpBtn").onclick = () => openModal("m-help");
+let browseList = [];
+function renderBrowse() {
+  const f = $("filter").value.toLowerCase();
+  const rows = browseList.filter(b => (b.rel + " " + (b.date || "")).toLowerCase().includes(f)).slice(0, 300);
+  $("browse").innerHTML = rows.map(b => `<div class="row"><span><b>${fmtWhen(parseNameDate(b.date)) || "date unknown"}</b><br><span class="small" style="word-break:break-all">${esc(b.rel)}</span></span>
+    <span style="white-space:nowrap"><span class="small num">${fmtBytes(b.mb * 1e6)}</span> <button data-p="${encodeURIComponent(b.path)}">Add</button></span></div>`).join("")
+    || '<div class="small">Nothing matches.</div>';
+  $("browse").querySelectorAll("button").forEach(btn => btn.onclick = () => addClicked(btn, decodeURIComponent(btn.dataset.p)));
+}
+// Add one bag; when it has several point cloud topics, a picker appears and the button is pressed again.
+async function addClicked(btn, path) {
+  if (!path) return toast("Paste the path of a bag file first", 3000);
+  if (btn.dataset.forPath !== path) { delete btn.dataset.topic; btn.dataset.forPath = path;
+    if (btn.previousElementSibling && btn.previousElementSibling.tagName === "SELECT") btn.previousElementSibling.remove(); }
+  {
+    try {
+      let topic = btn.dataset.topic;
+      if (!topic) {
+        const ts = await api(`/api/topics?path=${encodeURIComponent(path)}`);
+        if (!ts.length) return toast("This bag has no point cloud topic", 4000);
+        if (ts.length > 1) {                           // let the user pick, then press Add again
+          const pick = document.createElement("select");
+          pick.innerHTML = ts.map(t => `<option value="${esc(t.name)}">${esc(t.name)} · ${t.count} scans</option>`).join("");
+          const d = ts.find(t => t.name === (state && state.config && state.config.default_topic)); if (d) pick.value = d.name;
+          btn.dataset.topic = pick.value; pick.oninput = () => btn.dataset.topic = pick.value;
+          btn.before(pick, " "); btn.textContent = "Add with this topic";
+          return;
+        }
+        topic = ts[0].name;
+      }
+      await api("/api/bags/add", {path, topic}); btn.disabled = true; btn.textContent = "Added"; refreshState();
+    } catch (e) { toast(e.message, 4000); }
+  }
+}
+$("addPathBtn").onclick = () => addClicked($("addPathBtn"), $("addPath").value.trim());
+$("addPath").oninput = () => { const b = $("addPathBtn"); b.disabled = false; b.textContent = "Add"; };
+$("addBag").onclick = async e => {
+  e.preventDefault(); e.stopPropagation();
+  openModal("m-add"); $("browse").textContent = "Looking for bags…";
+  if (state && state.config) $("bagsRoot").textContent = state.config.bags_root;
+  try { browseList = await api("/api/browse"); renderBrowse(); } catch (err) { $("browse").textContent = err.message; }
+};
+$("filter").oninput = renderBrowse;
+
+// sidebar sections remember whether they are open
+document.querySelectorAll("details.sec").forEach(d => {
+  if (d.id in ui.open) d.open = ui.open[d.id];
+  d.addEventListener("toggle", () => {
+    ui.open[d.id] = d.open; saveUi();
+    if (d.open && d.id === "sec-acc") loadAccSoon(0);
+    if (d.open && d.id === "sec-files") loadFiles();
+  });
+});
+
+// resizable panels
+function splitter(el, apply, reset) {
+  el.addEventListener("mousedown", e => {
+    e.preventDefault(); el.classList.add("dragging");
+    const move = ev => { apply(ev); redraw(); drawTicks(); };
+    const up = () => { el.classList.remove("dragging"); window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); saveUi(); renderStats(); };
+    window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);
+  });
+  el.addEventListener("dblclick", () => { reset(); applyLayout(); saveUi(); redraw(); drawTicks(); });
+}
+function applyLayout() {
+  ui.sideW = Math.max(230, Math.min(ui.sideW, 640, window.innerWidth - 420));
+  const room = $("main").clientHeight - $("top").offsetHeight - $("scrubwrap").offsetHeight - $("imgbar").offsetHeight - $("bar").offsetHeight;
+  ui.imgH = Math.max(110, Math.min(ui.imgH, Math.max(110, room - 160)));
+  document.documentElement.style.setProperty("--sideW", ui.sideW + "px");
+  document.documentElement.style.setProperty("--imgH", ui.imgH + "px");
+}
+splitter($("vsplit"), e => { ui.sideW = e.clientX; applyLayout(); }, () => ui.sideW = 320);
+splitter($("hsplit"), e => { ui.imgH = e.clientY - $("imgwrap").getBoundingClientRect().top; applyLayout(); }, () => ui.imgH = 218);
+
+window.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT" && e.target.type !== "range" && e.target.type !== "checkbox") return;
+  if (e.key === "Escape") { if (shape) { shape = null; drawShape(); } else closeModals(); return; }
+  if (anyModal()) return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); undo(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === "?") { openModal("m-help"); return; }
+  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+  const tools = {p: "point", b: "box", l: "lasso"};
+  if (tools[k]) { setTool(tools[k]); return; }
+  const viewKeys = {
+    v: () => { $("vflip").checked = !$("vflip").checked; $("vflip").oninput(); },
+    m: () => { $("hflip").checked = !$("hflip").checked; $("hflip").oninput(); },
+    g: () => { $("colour").value = $("colour").value === "grey" ? "range" : "grey"; $("colour").oninput(); },
+    "[": () => setShift(ui.shift - Math.round(15 / colDeg)), "]": () => setShift(ui.shift + Math.round(15 / colDeg)),
+    ",": () => stepReviewed(-1), ".": () => stepReviewed(1), u: () => scan && nextUnconfirmed(),
+  };
+  if (viewKeys[k]) { viewKeys[k](); return; }
+  if (!scan) return;
+  const act = {
+    ArrowLeft: () => loadScan(scan.i - (e.shiftKey ? 10 : 1), true),
+    ArrowRight: () => loadScan(scan.i + (e.shiftKey ? 10 : 1), true),
+    Tab: () => stepFocus(e.shiftKey ? -1 : 1),
+    " ": () => { if (focus >= 0 && selectable(focus)) { pushUndo(); setSel(focus, !sel.has(focus)); redraw(); } },
+    a: () => $("accept").onclick(), x: () => $("clear").onclick(),
+    Enter: completeAndNext, s: () => $("savePartial").onclick(), n: nextInQueue,
+    c: () => { $("ctx").checked = !$("ctx").checked; redraw(); },
+    r: () => { view.c0 = 0; view.cols = C; Object.assign(cam, {yaw: 2.6, pitch: 0.55, dist: 5, target: [0, 0, 0]}); redraw(); },
+  }[k];
+  if (act) { e.preventDefault(); if (document.activeElement) document.activeElement.blur(); act(); }
+});
+window.addEventListener("resize", () => { applyLayout(); redraw(); drawTicks(); renderStats(); });
+window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
+
+(async function start() {
+  $("colour").value = ui.colour; $("vflip").checked = ui.vflip; $("hflip").checked = ui.hflip; $("shift").value = ui.shift;
+  applyLayout(); setTool(ui.tool);
+  initGL();
+  const g = await api("/api/geometry");
+  R = g.rings; C = g.cols; N = R * C; colDeg = g.col_deg || 360 / C; view.cols = C;
+  const sh = $("shift"), half = Math.floor(C / 2);
+  sh.min = -half; sh.max = half; sh.step = Math.max(1, Math.round(5 / colDeg));
+  if (Math.abs(ui.shift) > half) ui.shift = 0;
+  sh.value = ui.shift;
+  const dir = new Float32Array(N * 3), d2r = Math.PI / 180;
+  for (let c = 0; c < N; c++) {
+    const el = g.elev_deg[Math.floor(c / C)] * d2r, az = g.az_deg[c] * d2r;
+    dir[c * 3] = Math.cos(el) * Math.cos(az); dir[c * 3 + 1] = Math.cos(el) * Math.sin(az); dir[c * 3 + 2] = Math.sin(el);
+  }
+  geom = {...g, dir};
+  await poll();
+  loadFiles();
+  const want = new URLSearchParams(location.search);
+  if (want.get("bag") && state.bags.some(b => b.name === want.get("bag") && b.cached)) {
+    await selectBag(want.get("bag"));
+    if (want.get("i")) await loadScan(+want.get("i"));
+    if (want.get("focus")) stepFocus(1);
+  }
+  redraw();
+})();
+</script>
+</body>
+</html>

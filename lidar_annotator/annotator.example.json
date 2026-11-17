@@ -1,0 +1,13 @@
+{
+  "_comment": "Copy to <project>/annotator.json and keep only what you change. Every key and its default is listed in config.py.",
+
+  "sensor": "multiscan",
+  "bags_root": "/path/to/your/rosbags",
+  "default_topic": "/multiscan/lidar_scan",
+  "lidar_frame": null,
+  "port": 8765,
+
+  "paths": { "ledger": "annotations.jsonl" },
+  "queue": { "stride": 5, "min_gap_s": 2.0, "length": 40 },
+  "training": { "rounds": 600, "min_labels": 6, "mirror": true, "device": "auto" }
+}

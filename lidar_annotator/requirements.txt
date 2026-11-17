@@ -1,0 +1,9 @@
+# Beyond a ROS 2 installation (rosbag2_py, rclpy, sensor_msgs, tf2_msgs).
+# Create the environment so it still sees the ROS packages:
+#   python3 -m venv --system-site-packages .venv && .venv/bin/pip install -r requirements.txt
+numpy
+scikit-learn
+joblib
+# Optional: trains on an NVIDIA GPU when one is present. Without it training
+# uses scikit-learn on the CPU.
+xgboost

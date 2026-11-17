@@ -25,43 +25,9 @@ if [ ! -d "$VENV_DIR" ]; then
 
     python -m pip install --upgrade pip
 
-    # Determine which PyTorch wheel to install
-    if command -v nvidia-smi >/dev/null 2>&1; then
-        CUDA_VERSION=$(nvidia-smi | awk '/CUDA Version:/ {print $9}')
-
-        case "$CUDA_VERSION" in
-            13.2*)
-                TORCH_CUDA="cu132"
-                ;;
-            12.8*|12.9*)
-                TORCH_CUDA="cu128"
-                ;;
-            12.6*|12.7*)
-                TORCH_CUDA="cu126"
-                ;;
-            12.4*|12.5*)
-                TORCH_CUDA="cu124"
-                ;;
-            *)
-                echo "Unsupported or unknown CUDA version ($CUDA_VERSION)."
-                echo "Installing CPU-only PyTorch."
-                TORCH_CUDA=""
-                ;;
-        esac
-    else
-        echo "No NVIDIA GPU detected."
-        TORCH_CUDA=""
-    fi
-
-    if [ -n "$TORCH_CUDA" ]; then
-        echo "Installing PyTorch ($TORCH_CUDA)..."
-        pip install torch torchvision \
-            --index-url "https://download.pytorch.org/whl/$TORCH_CUDA"
-    else
-        pip install torch torchvision
-    fi
-
-    pip install h5py scikit-learn
+    # Gradient-boosted tree training (train_artifact_gbdt.py). The xgboost
+    # wheel uses the GPU when one is present; scikit-learn is the fallback.
+    pip install scikit-learn xgboost joblib
 else
     source "$VENV_DIR/bin/activate"
 fi

@@ -39,9 +39,6 @@ endif()
 install(PROGRAMS
     "src/grid_utils.py"
     "src/img_annotator_node.py"
-    "src/artifact_model.py"
-    "src/build_dataset.py"
-    "src/train.py"
     DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY
