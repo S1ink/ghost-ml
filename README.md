@@ -10,6 +10,7 @@ scans.
 | `ghost_tester/` | ROS 2 C++ package with the realtime filter example (`artifact_filter_node`) |
 | `ghost_annotation/` | the earlier Foxglove and joystick annotator (ROS 2 package) |
 | `launch_utils/` | launch helpers (git submodule) |
+| `csm_utils/` | shared C++ utility headers and CMake helpers, used by `ghost_tester` (git submodule) |
 
 ## Quick start
 
