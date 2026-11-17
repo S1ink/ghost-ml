@@ -360,6 +360,11 @@
     <div class="small" style="margin-bottom:4px">Classified bags and score files. Open the
       <code>…_classified</code> folder of an export in Foxglove. Deleting is permanent.</div>
     <div id="filesExports"></div>
+    <h4 style="margin:18px 0 4px">Label ledger <span class="small" id="ledgerPath"></span></h4>
+    <div class="small" style="margin-bottom:4px">Every save is added to the end of this file, so it also holds every
+      earlier version of every scan. Compacting rewrites it with one record per scan, its current labels. Labels and
+      training stay exactly the same, and the file as it was is kept beside it as a backup.</div>
+    <div class="row"><span id="ledgerInfo" class="num"></span><button id="ledgerCompact">Compact…</button></div>
   </div>
 </div></div>
 
@@ -1470,6 +1475,12 @@ async function loadFiles() {
   $("filesCnt").textContent = fmtBytes(mb + eb);
   $("filesSum").innerHTML = `<div class="kv num"><span>model sets</span><span>${files.models.length} · ${fmtBytes(mb)}</span>
     <span>exports</span><span>${files.exports.length} · ${fmtBytes(eb)}</span></div>`;
+  if (files.ledger) {
+    const L = files.ledger, extra = L.lines - L.scans;
+    $("ledgerPath").textContent = L.path;
+    $("ledgerInfo").textContent = `${L.lines} records for ${L.scans} scans · ${fmtBytes(L.bytes)}`;
+    $("ledgerCompact").disabled = extra <= 0;
+  }
   if (!$("m-files").classList.contains("open")) return;
   $("modelDir").textContent = files.model_dir; $("outDir").textContent = files.out_dir;
   const when = t => fmtWhen(new Date(t * 1000), false);
@@ -1540,6 +1551,13 @@ $("export").onclick = async () => {
 };
 $("filesBtn").onclick = () => { openModal("m-files"); loadFiles(); };
 $("filesRefresh").onclick = loadFiles;
+$("ledgerCompact").onclick = async () => {
+  if (dirty && scan) await save(scan.complete === true);
+  if (!confirm("Rewrite the ledger with one record per scan? The current file is kept as a backup next to it.")) return;
+  try { const r = await api("/api/ledger/compact", {});
+    toast(r.backup ? `Ledger compacted: ${r.lines_before} records down to ${r.lines_after}. Backup: ${r.backup.split("/").pop()}` : "Nothing to compact", 7000); loadFiles(); }
+  catch (e) { toast(e.message, 6000); }
+};
 $("helpBtn").onclick = () => openModal("m-help");
 let browseList = [];
 function renderBrowse() {

@@ -68,9 +68,12 @@ and is slightly less accurate. To make that the default, set
 model, so exports and proposals always match the model in use.
 
 The trained models are `models/artifact_xyz.joblib` (range only) and
-`models/artifact_full.joblib` (with intensity): a dict with the classifier
-under `"model"` and the settings it was trained with. Apply one to a scan
-with `artifact_features.compute_features` exactly as `classify_bag.py` does.
+`models/artifact_full.joblib` (with intensity). Training also writes each
+as `artifact_<variant>.model.txt`: the trees and every setting needed to
+build their inputs, as plain text, for use without Python. The C++ filter in
+`../ghost_tester` reads that file (see the README one level up).
+`export_model.py` writes the same file for an older model, and makes check
+files that compare the C++ result with Python's.
 
 ## Sensor profile
 
@@ -134,6 +137,7 @@ sessions and scans that training skips.
 | `scan_grid.py` | points to grid cells, bag reading, scan cache |
 | `artifact_features.py` | features of a return |
 | `sensor_profile.py` | measures a sensor profile from a recording |
+| `export_model.py` | writes a model as plain text for the C++ filter; makes check files |
 | `config.py` | settings |
 
 The command line tools take the same `--project`, `--config` and `--sensor`

@@ -77,6 +77,17 @@ def spec() -> dict:
             "far_log": FAR_LOG, "clip": CLIP, "max_dt_ns": MAX_DT_NS}
 
 
+def _log(r: np.ndarray) -> np.ndarray:
+    """
+    float32 log, computed in double and rounded. A single precision log differs
+    in the last bit between numpy and a C library, and the trees split exactly
+    at values that occur in the data, so that last bit can flip a decision.
+    Rounding a double log gives the same float32 everywhere (the C++ filter in
+    ghost_tester does the same).
+    """
+    return np.log(r.astype(np.float64)).astype(np.float32)
+
+
 def _shift(a: np.ndarray, dring: int, dcol: int) -> np.ndarray:
     """out[..., r, c] = a[..., r + dring, c + dcol]; NaN beyond the ring ends."""
     out = np.roll(a, -dcol, axis=-1) if dcol else a
@@ -137,7 +148,7 @@ def compute_features(
     if time_offsets is None:
         time_offsets = DEFAULT_TIME_OFFSETS
     r = rng_m.astype(np.float32)
-    logr = np.log(r)
+    logr = _log(r)
     feats = [r, np.broadcast_to(
         np.arange(r.shape[1], dtype=np.float32)[None, :, None], r.shape)]
 
@@ -180,7 +191,7 @@ def compute_features(
         same_cell = []
         patch_change = {}
         for dt in time_offsets:
-            lt = np.log(stack[dt].astype(np.float32))
+            lt = _log(stack[dt].astype(np.float32))
             for dc in (-1, 0, 1):
                 d = np.clip(_shift(lt, 0, dc) - logr, -CLIP, CLIP)
                 feats.append(d)

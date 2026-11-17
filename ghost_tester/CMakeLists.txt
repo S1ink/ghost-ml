@@ -204,9 +204,30 @@ target_link_libraries(test_node
     Eigen3::Eigen
     ${PCL_LIBRARIES} )
 
+# Lidar artifact filter example. include/artifact_filter/artifact_filter.hpp
+# is self-contained (no ROS, no PCL); OpenMP only makes it faster.
+find_package(OpenMP)
+
+add_executable(artifact_filter_node
+    "src/artifact_filter_node.cpp" )
+auto_target_dependencies(artifact_filter_node
+    rclcpp
+    sensor_msgs )
+
+# Compares the C++ against Python on a check file (no ROS).
+add_executable(artifact_filter_check
+    "src/artifact_filter_check.cpp" )
+
+if(OpenMP_CXX_FOUND)
+    target_link_libraries(artifact_filter_node OpenMP::OpenMP_CXX)
+    target_link_libraries(artifact_filter_check OpenMP::OpenMP_CXX)
+endif()
+
 # --- Export -------------------------------------------------------------------
 install(TARGETS
     test_node
+    artifact_filter_node
+    artifact_filter_check
     DESTINATION lib/${PROJECT_NAME} )
 
 ament_export_dependencies(

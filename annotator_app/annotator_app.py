@@ -340,6 +340,107 @@ class App:
                     self.ann.setdefault(key, set()).add(
                         (int(rec["ring"]), int(rec["azimuth_idx"])))
 
+    def ledger_info(self) -> dict:
+        path = self.args.ledger
+        lines = 0
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                lines = sum(1 for _ in f)
+        return {"path": os.path.abspath(path), "lines": lines, "scans": len(self.ann),
+                "bytes": os.path.getsize(path) if lines else 0}
+
+    def compact_ledger(self) -> dict:
+        """
+        Rewrites the ledger with one record per scan: its current labels. The
+        ledger is append-only, so every save, and every single point from the
+        oldest sessions, is otherwise kept for ever.
+
+        Nothing that affects labels or training changes: the record keeps the
+        last snapshot as it is and gains "sessions", every session that ever
+        wrote to the scan (training can exclude scans by session). The file as
+        it was is kept next to it as <ledger>.before-compact-<time>.
+        """
+        if self.jobs.running("train"):
+            raise ValueError("training is running")
+        path = self.args.ledger
+        with self.lock:
+            if not os.path.exists(path):
+                raise ValueError("there is no ledger yet")
+            with open(path) as f:
+                raw = f.read().splitlines()
+            last, legacy, sessions, headers, keep = {}, {}, {}, {}, []
+            for line in raw:
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    keep.append(line)               # not ours to drop
+                    continue
+                bag, stamp = rec.get("bag"), rec.get("scan_stamp_ns")
+                if rec.get("type") == "session":
+                    headers[rec.get("session")] = line
+                    continue
+                if bag is None or stamp is None:
+                    keep.append(line)
+                    continue
+                key = (bag, stamp)
+                sessions.setdefault(key, [])
+                for sid in [rec.get("session", "")] + list(rec.get("sessions", [])):
+                    if sid not in sessions[key]:
+                        sessions[key].append(sid)
+                if "selections" in rec:
+                    last[key] = rec
+                elif "ring" in rec and "azimuth_idx" in rec:
+                    if key not in last:
+                        legacy.setdefault(key, {"session": rec.get("session", ""), "cells": {}})
+                        legacy[key]["cells"][(int(rec["ring"]), int(rec["azimuth_idx"]))] = \
+                            rec.get("range_m")
+                        legacy[key]["session"] = rec.get("session", "")
+                else:
+                    keep.append(line)
+            out = []
+            for key in sorted(set(last) | set(legacy), key=lambda k: (k[0], k[1])):
+                if key in last:
+                    rec = dict(last[key])
+                else:                               # only single-point records: one snapshot
+                    rec = {"bag": key[0], "scan_stamp_ns": key[1],
+                           "session": legacy[key]["session"],
+                           "selections": [[r, c] + ([round(float(m), 3)] if m is not None else [])
+                                          for (r, c), m in sorted(legacy[key]["cells"].items())]}
+                if sessions[key] != [rec.get("session", "")]:
+                    rec["sessions"] = sessions[key]
+                out.append(rec)
+            used = {sid for rec in out for sid in [rec.get("session")] + rec.get("sessions", [])}
+            text = [h for sid, h in headers.items() if sid in used] + keep \
+                + [json.dumps(r) for r in out]
+
+            # Must read back as exactly the labels in use now, or nothing is written.
+            ann, complete = {}, {}
+            for rec in out:
+                key = (rec["bag"], rec["scan_stamp_ns"])
+                ann[key] = {(int(x[0]), int(x[1])) for x in rec["selections"]
+                            if isinstance(x, list) and len(x) >= 2}
+                if "complete" in rec:
+                    complete[key] = bool(rec["complete"])
+            if ann != self.ann or complete != self.complete:
+                raise RuntimeError("the compacted ledger would not match the labels in "
+                                   "memory; nothing was changed")
+            if len(text) >= len([l for l in raw if l.strip()]):
+                return {"lines_before": len(raw), "lines_after": len(raw),
+                        "scans": len(out), "backup": None}      # nothing to gain
+            backup = f"{path}.before-compact-{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            n = 1
+            while os.path.exists(backup):           # never write over a backup
+                n += 1
+                backup = backup.rsplit("~", 1)[0] + f"~{n}"
+            shutil.copy2(path, backup)
+            with open(path + ".tmp", "w") as f:
+                f.write("\n".join(text) + "\n")
+            os.replace(path + ".tmp", path)
+        return {"lines_before": len(raw), "lines_after": len(text), "scans": len(out),
+                "backup": backup}
+
     def save_scan(self, name: str, i: int, selections: list, complete: bool) -> dict:
         c = self.cache(name)
         stamp = int(c["rec_t"][i])
@@ -589,7 +690,7 @@ class App:
                         pass
                 exports.append(e)
             exports.sort(key=lambda e: -e["mtime"])
-        return {"models": models, "exports": exports,
+        return {"models": models, "exports": exports, "ledger": self.ledger_info(),
                 "model_dir": os.path.abspath(a.model_dir),
                 "out_dir": os.path.abspath(a.out_dir)}
 
@@ -625,7 +726,7 @@ class App:
         entry = {"time": stamp, "restored_from": ident, "models": {}}
         with self.model_lock:
             for v in ("xyz", "full"):
-                for ext in (".joblib", ".report.json"):
+                for ext in (".joblib", ".report.json", ".model.txt"):
                     cur = os.path.join(a.model_dir, f"artifact_{v}{ext}")
                     if os.path.exists(cur):
                         shutil.move(cur, os.path.join(keep, os.path.basename(cur)))
@@ -796,7 +897,7 @@ class App:
             entry = {"time": stamp, "threshold": threshold, "time_offsets": offsets,
                      "models": {}}
             for v in ("xyz", "full"):
-                for ext in (".joblib", ".report.json"):
+                for ext in (".joblib", ".report.json", ".model.txt"):
                     cur = os.path.join(a.model_dir, f"artifact_{v}{ext}")
                     new = os.path.join(staging, f"artifact_{v}{ext}")
                     if os.path.exists(new):
@@ -1241,6 +1342,7 @@ def make_handler(hub: Hub):
                 "/api/bags/remove": lambda: app.remove_bag(body["bag"]) or {"ok": True},
                 "/api/bags/label": lambda: app.set_label(body["bag"], body["label"]) or {"ok": True},
                 "/api/bags/topic": lambda: app.set_topic(body["bag"], body["topic"]),
+                "/api/ledger/compact": lambda: app.compact_ledger(),
                 "/api/files/delete": lambda: app.delete_file(body["kind"], body["id"]),
                 "/api/models/use": lambda: app.use_model(body["id"]),
                 "/api/train": lambda: {"job": app.train(float(body.get("threshold", 0.3)),

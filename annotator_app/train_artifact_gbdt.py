@@ -109,6 +109,8 @@ def load_ledger(path: str):
                 continue
             key = (bag, stamp)
             touched.setdefault(key, set()).add(rec.get("session", ""))
+            # A compacted ledger lists the earlier sessions of a scan here.
+            touched[key].update(rec.get("sessions", []))
             if "selections" in rec:
                 ann[key] = {(int(s[0]), int(s[1])) for s in rec["selections"]
                             if isinstance(s, list) and len(s) >= 2}
@@ -385,7 +387,24 @@ def print_summary(title, s):
           "count as false positives here.")
 
 
-def train_variant(name, X, y, groups, scan_key, aug, explicit, stamp, names, args, meta):
+def spread_features(caches, time_offsets, with_intensity, scans_per_bag=150):
+    """Features of returns from scans spread evenly over whole bags (not just
+    the reviewed ones), to calibrate the early exit on."""
+    out = []
+    for c in caches:
+        if with_intensity and c["intensity"] is None:
+            continue
+        n = len(c["hdr_t"])
+        idx = np.unique(np.linspace(0, n - 1, min(n, scans_per_bag)).astype(int))
+        rng = af.to_metres(np.asarray(c["range_mm"][idx]))
+        stack = af.gather_time_stack(c["range_mm"], c["hdr_t"], idx, time_offsets)
+        inten = np.asarray(c["intensity"][idx]) if with_intensity else None
+        out.append(af.compute_features(rng, stack, inten, time_offsets)[af.candidates(rng)])
+    return np.concatenate(out) if out else None
+
+
+def train_variant(name, X, y, groups, scan_key, aug, explicit, stamp, names, args, meta,
+                  extra=None):
     print(f"\n{'=' * 70}\nModel '{name}': {X.shape[1]} features")
     # A mirrored scan has the same label count as its original.
     _, inv = np.unique(scan_key * 2 + aug, return_inverse=True)
@@ -441,7 +460,7 @@ def train_variant(name, X, y, groups, scan_key, aug, explicit, stamp, names, arg
     import joblib
     os.makedirs(args.model_dir, exist_ok=True)
     path = os.path.join(args.model_dir, f"artifact_{name}.joblib")
-    joblib.dump({
+    bundle = {
         "model": model,
         "feature_names": names,
         "time_offsets": list(args.time_offsets),
@@ -454,9 +473,24 @@ def train_variant(name, X, y, groups, scan_key, aug, explicit, stamp, names, arg
         "trained_on": DEVICE,
         "trained": datetime.now(timezone.utc).isoformat(),
         **meta,
-    }, path)
+    }
+    # Checkpoints for the C++ filter's early exit, from every row at hand:
+    # the training returns plus returns of scans spread over the bags.
+    try:
+        import export_model
+        rows = [X[~aug]] + ([extra] if extra is not None and len(extra) else [])
+        bundle["early_exit"] = export_model.calibrate_early_exit(model, np.concatenate(rows))
+    except Exception as e:
+        print(f"  NOTE: early exit not calibrated ({e})")
+    joblib.dump(bundle, path)
     with open(path.replace(".joblib", ".report.json"), "w") as f:
         json.dump({"model": name, "features": names, **meta, **report}, f, indent=1)
+    # The same model as plain text for use outside Python (C++ filter).
+    try:
+        import export_model
+        export_model.write_model(bundle, path.replace(".joblib", ".model.txt"), name)
+    except Exception as e:
+        print(f"  NOTE: no .model.txt export written ({e})")
     print(f"\n  saved {path}")
 
 
@@ -560,13 +594,16 @@ def main():
         "time_offsets": list(args.time_offsets),
     }
     names = af.feature_names(args.time_offsets, False)
-    train_variant("xyz", X, y, groups, scan_key, aug, explicit, stamp, names, args, meta)
+    caches = [ensure_cache(b, args.cache_dir, args.topic) for b in args.bags]
+    train_variant("xyz", X, y, groups, scan_key, aug, explicit, stamp, names, args, meta,
+                  spread_features(caches, args.time_offsets, False))
 
     if has_int.any():
         m = has_int
         names_full = af.feature_names(args.time_offsets, True)
         train_variant("full", np.concatenate([X[m], Xi[m]], axis=1), y[m],
-                      groups[m], scan_key[m], aug[m], explicit[m], stamp[m], names_full, args, meta)
+                      groups[m], scan_key[m], aug[m], explicit[m], stamp[m], names_full, args, meta,
+                      spread_features(int_caches, args.time_offsets, True))
     else:
         print("\nNo intensity source matched the annotated scans; "
               "only the xyz model was trained.")
