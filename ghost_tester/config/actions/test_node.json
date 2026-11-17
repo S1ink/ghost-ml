@@ -1,0 +1,14 @@
+{
+    "test_node":
+    {
+        "pragma:default": null,
+
+        "enabled":
+        {
+            "pragma:node_options":
+            {
+                "emulate_tty": true
+            }
+        }
+    }
+}

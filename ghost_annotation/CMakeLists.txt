@@ -38,7 +38,6 @@ endif()
 # --- Install ------------------------------------------------------------------
 install(PROGRAMS
     "src/grid_utils.py"
-    "src/pc_annotator_node.py"
     "src/img_annotator_node.py"
     DESTINATION lib/${PROJECT_NAME})
 
