@@ -1,0 +1,35 @@
+{
+    "pragma:enable_preproc": true,
+    "pragma:import":
+    [
+        "actions/artifact_filter.json",
+        "actions/test_node.json",
+        "presets/filter.json",
+        "../../launch_utils/config/actions/bag.json",
+        "../../launch_utils/config/actions/foxglove.json",
+        "../../launch_utils/config/actions/tf.json"
+    ],
+
+    "bag_play":
+    {
+        "pragma:default": "lidar_live",
+
+        "lidar_live":
+        {
+            "topics":
+            [
+                "/multiscan/lidar_scan",
+                "/multiscan/imu",
+                "/tf",
+                "/tf_static"
+            ],
+            "start_paused": false,
+            "loop": false
+        },
+        "lidar_loop":
+        {
+            "pragma:derived": "lidar_live",
+            "loop": true
+        }
+    }
+}

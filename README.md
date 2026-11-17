@@ -58,11 +58,32 @@ this writes a plain text copy that needs no Python:
 <workspace>/models/artifact_full.model.txt   also uses intensity
 ```
 
-Build and run the example filter:
+Build, then launch the filter with a bag playing into it:
 
 ```bash
 cd <workspace>
 ./src/build_ros.sh
+./src/run_filter.sh bag:=<a recording>
+```
+
+`run_filter.sh` uses `<workspace>/models/artifact_xyz.model.txt` unless you
+pass `model:=<file>`. Further arguments choose presets from
+`ghost_tester/config/`, in the same way as the annotation launch:
+
+| argument | effect |
+| --- | --- |
+| `filter:=lance1` or `lance2` | also start the Foxglove bridge and that robot's transforms |
+| `filter:=debug` | Foxglove bridge, exact probabilities, and the `classified` cloud |
+| `artifact_filter:=multiscan_debug` | only the node's debug settings |
+| `bag_play:=lidar_loop` | loop the bag (`all` plays every topic, starting paused) |
+| `test_node:=enabled` | also run the PCL shadow point test node |
+
+The Foxglove bridge listens on port 8765, the same port as the annotator
+app, so do not run both at once without changing one of them.
+
+To run the node by itself on a live topic:
+
+```bash
 source install/setup.bash
 ros2 run ghost_tester artifact_filter_node --ros-args \
     -p model_file:=$PWD/models/artifact_xyz.model.txt \
@@ -118,4 +139,5 @@ changed any decision.
 | `setup_venv.sh` | creates `<workspace>/.venv` |
 | `run_annotator.sh` | starts the web app with the workspace as its project |
 | `build_ros.sh` | `colcon build` of the ROS packages (run from the workspace) |
+| `run_filter.sh` | launches the C++ filter, usually with `bag:=<recording>` |
 | `run_ros.sh` | launches the earlier Foxglove annotator |

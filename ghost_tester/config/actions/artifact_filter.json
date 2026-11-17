@@ -1,0 +1,28 @@
+{
+    "artifact_filter":
+    {
+        "pragma:default": "multiscan",
+
+        "multiscan":
+        {
+            "pragma:node_options":
+            {
+                "emulate_tty": true
+            },
+
+            "model_file": "",
+            "input_topic": "/multiscan/lidar_scan",
+            "threshold": -1.0,
+            "early_exit": true,
+            "keep_near": false,
+            "publish_artifacts": true,
+            "publish_classified": false
+        },
+        "multiscan_debug":
+        {
+            "pragma:derived": "multiscan",
+            "early_exit": false,
+            "publish_classified": true
+        }
+    }
+}
