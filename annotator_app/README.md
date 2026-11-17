@@ -23,27 +23,54 @@ python3 -m venv --system-site-packages .venv      # still sees the ROS packages
 `run.sh` sources ROS from `/opt/ros` when no ROS environment is active and
 uses `.venv` next to it (or the one named by `ANNOTATOR_VENV`).
 
+Inside the ghost workspace none of this is needed: `../setup_venv.sh`
+creates the environment and `../run_annotator.sh` starts the app with the
+workspace as the project.
+
 ## Starting
 
-A **project** is a directory that holds everything belonging to one sensor
-setup: labels, the list of bags, the scan cache, models and exports. Any
-empty directory will do.
-
-First start with a new lidar, measuring its scan geometry from a recording:
-
 ```bash
-./run.sh --project ~/lidar-project --bags-root /path/to/bags \
-         --sensor-from-bag /path/to/bags/some_recording.mcap
-```
-
-Afterwards, and for a lidar with a shipped profile (`--sensor multiscan`):
-
-```bash
-./run.sh --project ~/lidar-project --bags-root /path/to/bags
+./run.sh [--port 9000]
 ```
 
 Then open http://localhost:8765. The Help button in the app explains the
-controls. Flags you use every time can go in `<project>/annotator.json`.
+controls.
+
+A **project** is a folder that holds everything belonging to one lidar
+setup: labels, the list of bags, the scan cache, models and exports. Any
+folder will do. On the first start the page shows a project screen: pick
+the folder, say which lidar it is (a shipped profile, or "measure it from a
+recording" for any other), and optionally the folder your bags are in. The
+answers are saved in the project (`annotator.json`, `sensor.json`), so the
+next start opens it directly. The Project button brings the screen back to
+switch projects or change the bags folder.
+
+Which project opens at start: `--project <dir>` when given, else the
+current folder when it is a project, else the one used last (remembered in
+`~/.config/annotator_app/recent.json`).
+
+The same can be done without the page: `--sensor multiscan` or
+`--sensor-from-bag <bag>`, `--bags-root <folder>`, or by writing
+`annotator.json` by hand.
+
+A Python environment only works with the Python that created it. If the
+environment was made inside a container, start the app inside that
+container too; `run.sh` says so when the versions differ.
+
+## Realtime models
+
+By default the classifier judges a return with the two scans before and the
+two scans after it, which needs a recording. For a model that runs on a
+live sensor, choose "before only (realtime)" beside Train (or
+`train_artifact_gbdt.py --time-offsets -2 -1`): it uses earlier scans only
+and is slightly less accurate. To make that the default, set
+`"features": {"time_offsets": [-2, -1]}`. The offsets are stored in the
+model, so exports and proposals always match the model in use.
+
+The trained models are `models/artifact_xyz.joblib` (range only) and
+`models/artifact_full.joblib` (with intensity): a dict with the classifier
+under `"model"` and the settings it was trained with. Apply one to a scan
+with `artifact_features.compute_features` exactly as `classify_bag.py` does.
 
 ## Sensor profile
 

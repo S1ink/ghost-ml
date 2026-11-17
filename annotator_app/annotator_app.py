@@ -9,8 +9,13 @@ mark scans complete, retrain, and export classified bags.
 Run with run.sh next to this file, or directly in a ROS 2 Python environment
 (rosbag2_py), then open http://localhost:8765
 
-    python3 annotator_app.py --project <project dir> [--bags-root <folder>]
+    python3 annotator_app.py [--project <project dir>] [--bags-root <folder>]
         [--sensor multiscan | --sensor-from-bag <bag>] [--port 8765]
+
+Without --project the current folder is opened when it is a project, else
+the project used last. When there is nothing to open, or the project has no
+sensor profile yet, the page shows a project screen to choose or set one up;
+the same screen (Project button) switches projects later.
 
 The project directory holds the ledger, the bag registry, the scan cache,
 the models and the exports, and optionally annotator.json with the settings
@@ -421,6 +426,7 @@ class App:
             with open(rp) as f:
                 rep = json.load(f)
             out[v] = {"trained": b.get("trained"), "threshold": b.get("default_threshold", 0.5),
+                      "time_offsets": list(b["time_offsets"]),
                       "summary": summarise_report(rep)}
         return out
 
@@ -720,7 +726,9 @@ class App:
         return out
 
     # ── training and export ─────────────────────────────────────────────────
-    def train(self, threshold: float) -> int:
+    def train(self, threshold: float, realtime: bool | None = None) -> int:
+        """realtime: train a model that only looks at earlier scans, so it can
+        run on a live sensor. None = as features.time_offsets says."""
         if self.jobs.running("train"):
             raise ValueError("training is already running")
         a = self.args
@@ -737,6 +745,8 @@ class App:
                *config.passthrough(self.cfg), "--bags", *bags,
                "--model-dir", staging, "--progress",
                "--default-threshold", str(threshold)]
+        offsets = [d for d in af.DEFAULT_TIME_OFFSETS if d < 0 or not realtime]
+        cmd += ["--time-offsets", *map(str, offsets)]
         if raws:
             cmd += ["--intensity-bags", *raws]
         if self.reg.get("exclude_sessions"):
@@ -783,7 +793,8 @@ class App:
             prog["stage"], prog["frac"] = "installing the new models", 1.0
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             keep = os.path.join(a.model_dir, "history", stamp + "_replaced")
-            entry = {"time": stamp, "threshold": threshold, "models": {}}
+            entry = {"time": stamp, "threshold": threshold, "time_offsets": offsets,
+                     "models": {}}
             for v in ("xyz", "full"):
                 for ext in (".joblib", ".report.json"):
                     cur = os.path.join(a.model_dir, f"artifact_{v}{ext}")
@@ -852,7 +863,8 @@ class App:
                            "default_topic": self.args.topic,
                            "bag_extensions": list(self.exts),
                            "sensor": sg.PROFILE.get("name", ""),
-                           "scan_rate_hz": sg.SCAN_RATE_HZ},
+                           "scan_rate_hz": sg.SCAN_RATE_HZ,
+                           "time_offsets": list(af.DEFAULT_TIME_OFFSETS)},
                 "unregistered": sorted({k[0] for k in self.ann}
                                        - {b["name"] for b in self.reg["bags"]})}
 
@@ -900,6 +912,7 @@ def summarise_report(rep: dict) -> dict:
         "partial_scans": pl.get("n_scans"), "partial_labels": pl.get("n_artifact"),
         "partial_recall": at(pl, 0.3).get("recall"),
         "partial_extra": at(pl, 0.3).get("flagged_unlabelled"),
+        "time_offsets": rep.get("time_offsets"),    # None in older reports
     }
 
 
@@ -939,10 +952,215 @@ def geometry() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Projects: which one is open, opening another, setting one up
+# ─────────────────────────────────────────────────────────────────────────────
+
+def recent_file() -> str:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "annotator_app", "recent.json")
+
+
+def full_path(path: str) -> str:
+    return os.path.abspath(os.path.expanduser(str(path).strip()))
+
+
+class Hub:
+    """Holds the open project (an App) and can replace it while serving."""
+
+    def __init__(self, args, overrides: dict):
+        self.args, self.overrides = args, overrides
+        self.app: App | None = None
+        self.suggest = full_path(args.project or ".")   # prefilled in the setup screen
+        self.problem = None                             # why nothing is open
+        self.lock = threading.Lock()
+
+    # ── recent projects ─────────────────────────────────────────────────────
+    def recent(self) -> list:
+        try:
+            with open(recent_file()) as f:
+                return [p for p in json.load(f) if isinstance(p, str)]
+        except (OSError, ValueError):
+            return []
+
+    def _remember(self, project: str):
+        paths = [project] + [p for p in self.recent() if p != project]
+        try:
+            os.makedirs(os.path.dirname(recent_file()), exist_ok=True)
+            with open(recent_file(), "w") as f:
+                json.dump(paths[:12], f, indent=1)
+        except OSError:
+            pass                                        # only a convenience
+
+    # ── opening ─────────────────────────────────────────────────────────────
+    def open(self, project: str, first: bool = False) -> dict:
+        """Opens a project that is already set up. The command line's settings
+        flags apply to the project named on the command line only."""
+        project = full_path(project)
+        with self.lock:
+            if self.app and any(j["status"] == "running" for j in self.app.jobs.jobs.values()):
+                raise ValueError("wait for the running jobs to finish first")
+            a = argparse.Namespace(**vars(self.args))
+            a.project = project
+            if not first:
+                a.config = a.sensor = a.ledger = a.cache_dir = a.model_dir = a.out_dir = None
+            try:
+                cfg = config.from_args(a, self.overrides if first else None)
+                sg.check_cache_dir(cfg["paths"]["cache"])
+            except (SystemExit, RuntimeError) as e:
+                raise ValueError(str(e)) from None
+            self.app = App(cfg)
+            self.problem = None
+            self._remember(project)
+        return self.info()
+
+    def inspect(self, path: str) -> dict:
+        """What is at a path, for the setup screen."""
+        path = full_path(path)
+        out = {"path": path, "exists": os.path.isdir(path), "ready": False, "sensor": None,
+               "has_settings": os.path.exists(os.path.join(path, "annotator.json")),
+               "bags_root": None, "default_topic": None, "labels": False}
+        if os.path.exists(path) and not out["exists"]:
+            out["error"] = "that is a file, not a folder"
+            return out
+        try:
+            cfg = config.load(path, need_sensor=False)
+            out["bags_root"] = cfg["bags_root"] if cfg["bags_root"] != path else None
+            out["default_topic"] = cfg["default_topic"]
+            out["labels"] = os.path.exists(cfg["paths"]["ledger"])
+            if cfg["sensor"] is not None or os.path.exists(os.path.join(path, "sensor.json")):
+                prof = config.load_sensor(cfg["sensor"], path)
+                out["sensor"] = prof.get("name") or "unnamed"
+                out["ready"] = True
+        except SystemExit as e:
+            out["error"] = str(e)
+        return out
+
+    def create(self, body: dict) -> dict:
+        """Writes a project's settings (and sensor profile), then opens it."""
+        path = full_path(body["path"])
+        look = self.inspect(path)
+        if look.get("error") and not look["has_settings"]:
+            raise ValueError(look["error"])
+        settings_file = os.path.join(path, "annotator.json")
+        settings = {}
+        if look["has_settings"]:
+            try:
+                with open(settings_file) as f:
+                    settings = json.load(f)
+            except ValueError as e:
+                raise ValueError(f"{settings_file}: {e}") from None
+        profile = None
+        if not look["ready"]:
+            if body.get("sensor_bag"):
+                bag = full_path(body["sensor_bag"])
+                if not os.path.isfile(bag):
+                    raise ValueError(f"no such recording: {bag}")
+                import sensor_profile
+                names = [t["name"] for t in sg.pointcloud_topics(bag)]
+                if not names:
+                    raise ValueError("that recording has no point cloud topic")
+                topic = body.get("sensor_topic") or names[0]
+                profile = sensor_profile.derive(bag, topic, body.get("sensor_name") or None)
+                if profile["_derived"]["problems"]:
+                    raise ValueError("That recording does not fit a fixed scan grid: "
+                                     + "; ".join(profile["_derived"]["problems"])
+                                     + ". Is it the lidar's own topic?")
+                settings.pop("sensor", None)
+                settings.setdefault("default_topic", topic)
+            elif body.get("sensor"):
+                if body["sensor"] not in config.builtin_sensors():
+                    raise ValueError(f"unknown sensor '{body['sensor']}'")
+                settings["sensor"] = body["sensor"]
+            else:
+                raise ValueError("choose a sensor, or a recording to measure it from")
+        if body.get("bags_root"):
+            root = full_path(body["bags_root"])
+            if not os.path.isdir(root):
+                raise ValueError(f"no such folder: {root}")
+            settings["bags_root"] = root
+        if body.get("default_topic"):
+            settings["default_topic"] = body["default_topic"].strip()
+        try:
+            os.makedirs(path, exist_ok=True)
+            if profile is not None:
+                with open(os.path.join(path, "sensor.json"), "w") as f:
+                    json.dump(profile, f, indent=1)
+            if settings or look["has_settings"]:
+                with open(settings_file + ".tmp", "w") as f:
+                    json.dump(settings, f, indent=2)
+                os.replace(settings_file + ".tmp", settings_file)
+        except OSError as e:
+            raise ValueError(f"cannot write to {path}: {e.strerror}") from None
+        return self.open(path)
+
+    def set_bags_root(self, root: str) -> dict:
+        """Changes the bags folder of the open project and saves it."""
+        app = self.need()
+        root = full_path(root)
+        if not os.path.isdir(root):
+            raise ValueError(f"no such folder: {root}")
+        settings_file = os.path.join(app.cfg["project"], "annotator.json")
+        settings = {}
+        if os.path.exists(settings_file):
+            with open(settings_file) as f:
+                settings = json.load(f)
+        settings["bags_root"] = root
+        with open(settings_file + ".tmp", "w") as f:
+            json.dump(settings, f, indent=2)
+        os.replace(settings_file + ".tmp", settings_file)
+        app.cfg["bags_root"] = app.args.bags_root = root
+        app.cfg["config_file"] = settings_file
+        return self.info()
+
+    def need(self) -> "App":
+        if self.app is None:
+            raise ValueError("no project is open")
+        return self.app
+
+    def info(self) -> dict:
+        app = self.app
+        cur = None
+        if app:
+            cur = {"path": app.cfg["project"], "sensor": sg.PROFILE.get("name", ""),
+                   "grid": [sg.N_RINGS, sg.N_COLS], "bags_root": app.args.bags_root,
+                   "default_topic": app.args.topic, "bags": len(app.reg["bags"]),
+                   "reviewed": len(app.ann)}
+        return {"open": cur, "suggest": self.suggest, "problem": self.problem,
+                "recent": [p for p in self.recent() if not cur or p != cur["path"]],
+                "sensors": config.builtin_sensors(), "home": os.path.expanduser("~")}
+
+    def listdir(self, path: str) -> dict:
+        """Folders and bag files of a directory, for the path pickers."""
+        path = full_path(path or "~")
+        while not os.path.isdir(path) and os.path.dirname(path) != path:
+            path = os.path.dirname(path)
+        dirs, bags = [], []
+        try:
+            for e in sorted(os.scandir(path), key=lambda e: e.name.lower()):
+                if e.name.startswith("."):
+                    continue
+                if e.is_dir():
+                    dirs.append(e.name)
+                elif e.name.lower().endswith(tuple(config.DEFAULTS["bag_extensions"])):
+                    bags.append(e.name)
+        except OSError as e:
+            raise ValueError(f"cannot read {path}: {e.strerror}") from None
+        parent = os.path.dirname(path)
+        return {"path": path, "parent": parent if parent != path else None,
+                "dirs": dirs[:500], "bags": bags[:500]}
+
+    def topics(self, path: str) -> list:
+        path = full_path(path)
+        if not os.path.isfile(path):
+            raise ValueError(f"no such recording: {path}")
+        return sg.pointcloud_topics(path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # HTTP
 # ─────────────────────────────────────────────────────────────────────────────
 
-def make_handler(app: App):
+def make_handler(hub: Hub):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -974,6 +1192,17 @@ def make_handler(app: App):
             if u.path in ("/", "/index.html"):
                 with open(os.path.join(HERE, "annotator_app.html"), "rb") as f:
                     return self._send(200, f.read(), "text/html; charset=utf-8")
+            setup = {
+                "/api/project": hub.info,
+                "/api/project/inspect": lambda: hub.inspect(q["path"]),
+                "/api/project/topics": lambda: hub.topics(q["path"]),
+                "/api/fs": lambda: hub.listdir(q.get("path", "")),
+            }
+            if u.path in setup:
+                return self._run(setup[u.path])
+            app = hub.app
+            if app is None and u.path.startswith("/api/"):
+                return self._send(409, {"error": "no project is open"})
             routes = {
                 "/api/state": lambda: app.state(),
                 "/api/geometry": geometry,
@@ -995,6 +1224,16 @@ def make_handler(app: App):
             u = urlparse(self.path)
             n = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(n) or b"{}")
+            setup = {
+                "/api/project/open": lambda: hub.open(body["path"]),
+                "/api/project/create": lambda: hub.create(body),
+                "/api/project/bags_root": lambda: hub.set_bags_root(body["path"]),
+            }
+            if u.path in setup:
+                return self._run(setup[u.path])
+            app = hub.app
+            if app is None:
+                return self._send(409, {"error": "no project is open"})
             routes = {
                 "/api/save": lambda: app.save_scan(body["bag"], int(body["i"]),
                                                    body["selections"], body["complete"]),
@@ -1004,7 +1243,8 @@ def make_handler(app: App):
                 "/api/bags/topic": lambda: app.set_topic(body["bag"], body["topic"]),
                 "/api/files/delete": lambda: app.delete_file(body["kind"], body["id"]),
                 "/api/models/use": lambda: app.use_model(body["id"]),
-                "/api/train": lambda: {"job": app.train(float(body.get("threshold", 0.3)))},
+                "/api/train": lambda: {"job": app.train(float(body.get("threshold", 0.3)),
+                                                         body.get("realtime"))},
                 "/api/export": lambda: {"job": app.export(body["bag"], body.get("threshold"))},
             }
             if u.path in routes:
@@ -1018,6 +1258,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     config.add_arguments(ap)
+    ap.set_defaults(project=None)       # None: this folder, the last project, or the setup screen
     ap.add_argument("--registry", default=None, help="bag registry file")
     ap.add_argument("--bags-root", default=None,
                     help="folder the Add dialog lists bags from "
@@ -1037,8 +1278,10 @@ def main():
         over["bags_root"] = os.path.abspath(os.path.expanduser(args.bags_root))
     if args.registry:
         over["paths"] = {"registry": os.path.abspath(args.registry)}
+    explicit = args.project is not None
     if args.sensor_from_bag:
         import sensor_profile
+        args.project, explicit = args.project or ".", True
         pre = config.from_args(args, over, need_sensor=False)
         out = os.path.join(pre["project"], "sensor.json")
         if os.path.exists(out):
@@ -1060,20 +1303,37 @@ def main():
         with open(out, "w") as f:
             json.dump(profile, f, indent=1)
         print(f"Sensor profile written to {out}", flush=True)
-    cfg = config.from_args(args, over)
-    os.makedirs(cfg["project"], exist_ok=True)
+    hub = Hub(args, over)
+    if not explicit:
+        # No project named: the current folder when it is one, else the last
+        # one used, else the setup screen.
+        here = os.getcwd()
+        is_project = any(os.path.exists(os.path.join(here, f))
+                         for f in ("annotator.json", "sensor.json"))
+        args.project = here if is_project else next(
+            (p for p in hub.recent() if os.path.isdir(p)), here)
+        hub.suggest = here
     try:
-        sg.check_cache_dir(cfg["paths"]["cache"])
-    except RuntimeError as e:
-        sys.exit(str(e))
+        hub.open(args.project, first=True)
+    except ValueError as e:
+        # Not set up yet (or broken): the page shows the project screen.
+        hub.suggest = full_path(args.project) if explicit else hub.suggest
+        hub.problem = None if str(e).startswith("No sensor profile") else str(e)
 
-    app = App(cfg)
-    server = ThreadingHTTPServer((cfg["host"], cfg["port"]), make_handler(app))
+    pre = config.from_args(args, over, need_sensor=False) if hub.app is None else hub.app.cfg
+    host, port = pre["host"], pre["port"]
+    server = ThreadingHTTPServer((host, port), make_handler(hub))
     server.daemon_threads = True
-    print(f"Annotator: http://{cfg['host']}:{cfg['port']}   project {cfg['project']}\n"
-          f"  sensor: {sg.PROFILE.get('name', '?')} ({sg.N_RINGS} x {sg.N_COLS})   "
-          f"{len(app.reg['bags'])} bags, {len(app.ann)} reviewed scans, "
-          f"session {SESSION_ID}", flush=True)
+    if hub.app:
+        app = hub.app
+        print(f"Annotator: http://{host}:{port}   project {app.cfg['project']}\n"
+              f"  sensor: {sg.PROFILE.get('name', '?')} ({sg.N_RINGS} x {sg.N_COLS})   "
+              f"{len(app.reg['bags'])} bags, {len(app.ann)} reviewed scans, "
+              f"session {SESSION_ID}", flush=True)
+    else:
+        print(f"Annotator: http://{host}:{port}   no project open yet: "
+              f"choose or set one up in the browser"
+              f"{f' ({hub.problem})' if hub.problem else ''}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

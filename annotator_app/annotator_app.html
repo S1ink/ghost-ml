@@ -162,7 +162,8 @@
 <body>
 <div id="side">
   <div id="sidehead"><b>Lidar artifact annotator</b>
-    <button id="helpBtn" title="How to use this (?)">Help</button></div>
+    <span style="display:flex; gap:6px"><button id="projBtn" title="Open, switch or set up a project">Project</button>
+    <button id="helpBtn" title="How to use this (?)">Help</button></span></div>
 
   <details class="sec" id="sec-bags" open><summary><span class="ttl">Bags</span>
     <span class="cnt" id="bagsCnt"></span><button id="addBag">Add…</button></summary>
@@ -182,6 +183,12 @@
         <input id="trainThr" type="number" min="0.05" max="0.95" step="0.05" value="0.3" style="width:58px">
         <span class="grow"></span><button id="chartsBtn">Charts…</button>
       </div>
+      <label class="small" style="display:flex; gap:6px; align-items:center; margin-bottom:8px"
+        title="A model for a live sensor cannot wait for later scans. Past scans only is slightly less accurate.">scans used
+        <select id="trainKind" style="flex:1">
+          <option value="offline">before and after (recorded bags)</option>
+          <option value="realtime">before only (realtime)</option>
+        </select></label>
       <div id="trainLive"></div>
     </div></details>
 
@@ -291,6 +298,45 @@
   <div class="scroll" id="browse" style="margin-top:8px"></div>
 </div></div>
 
+<!-- project: open, switch, set up -->
+<div class="modal" id="m-project"><div class="box" style="width:min(760px,96vw)">
+  <div class="head"><b id="pjTitle">Project</b><span class="grow"></span><button data-close id="pjClose">Close</button></div>
+  <div class="scroll">
+    <div id="pjProblem" class="small" style="color:var(--warn); margin-bottom:8px"></div>
+    <div id="pjCurrent"></div>
+    <div id="pjRecent"></div>
+    <h3 style="margin:14px 0 4px">Open or set up a project</h3>
+    <div class="small" style="margin-bottom:6px">A project is a folder that keeps the labels, the bag list, the scan cache, the models
+      and the exports of one lidar setup. Any folder works; an empty or new one is set up here.</div>
+    <div class="row"><input id="pjPath" type="text" placeholder="project folder" style="flex:1">
+      <button data-browse="pjPath" data-kind="dir">Browse…</button></div>
+    <div id="pjLook" class="small" style="margin:4px 6px"></div>
+    <div id="pjSetup" style="display:none">
+      <label class="small">Lidar<br>
+        <select id="pjSensor" style="width:100%; margin:3px 0 8px"></select></label>
+      <div id="pjMeasure" style="display:none">
+        <div class="small">A recording from this lidar. Its layers, azimuth step and scan rate are measured once and kept with the project.</div>
+        <div class="row"><input id="pjBag" type="text" placeholder="recording (.mcap or .db3)" style="flex:1">
+          <button data-browse="pjBag" data-kind="bag">Browse…</button></div>
+        <label class="small" id="pjTopicRow" style="display:none">Lidar topic<br>
+          <select id="pjTopic" style="width:100%; margin:3px 0 8px"></select></label>
+      </div>
+    </div>
+    <div id="pjRootRow" style="display:none">
+      <label class="small">Folder with your recordings (listed under Add…; optional, bags can also be added by path)</label>
+      <div class="row"><input id="pjRoot" type="text" placeholder="bags folder" style="flex:1">
+        <button data-browse="pjRoot" data-kind="dir">Browse…</button></div>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center; margin-top:10px">
+      <button id="pjGo" class="primary" disabled>Open</button><span id="pjBusy" class="small"></span></div>
+    <div id="pjFs" style="display:none; margin-top:12px; border-top:1px solid var(--line); padding-top:8px">
+      <div class="head"><b class="small" id="fsPath" style="word-break:break-all; font-weight:500"></b><span class="grow"></span>
+        <button id="fsUse" class="mini">Use this folder</button><button id="fsCancel" class="mini">Cancel</button></div>
+      <div id="fsList" style="max-height:32vh; overflow-y:auto"></div>
+    </div>
+  </div>
+</div></div>
+
 <!-- bag settings -->
 <div class="modal" id="m-bag"><div class="box" style="width:min(560px,94vw)">
   <div class="head"><b>Bag settings</b><span class="grow"></span><button data-close>Close</button></div>
@@ -352,7 +398,10 @@
         toggle with <kbd>Space</kbd>, or press <kbd>A</kbd> to accept every proposal and then fix the exceptions.</li>
       <li>When every error in the scan is selected, press <kbd>Enter</kbd>: the scan is saved as
         <b>complete</b> and the next queue item opens.</li>
-      <li>After 30 or more new scans, press <b>Train</b> (about a minute). Proposals and the queue then come from the new model.</li>
+      <li>After 30 or more new scans, press <b>Train</b> (about a minute). Proposals and the queue then come from the new model.
+        <b>Scans used</b> picks what the model may look at: the scans before and after each one (best for recorded bags), or the
+        scans before only, for a model that has to run on a live sensor. The model in use is tagged with its kind; the one it
+        replaces stays under Files and can be put back.</li>
       <li><b>Export classified bag</b> writes a bag you can inspect in Foxglove.</li>
     </ol>
     <h3>Complete and partial</h3>
@@ -1221,11 +1270,20 @@ async function openBagSettings(b) {
     } catch (err) { toast(err.message, 5000); }
   };
 }
+// What a model needs around a scan: null = unknown (older report).
+const isRealtime = offs => offs ? !offs.some(d => d > 0) : null;
+const kindTag = offs => { const r = isRealtime(offs);
+  return r === null ? "" : `<span class="tag" title="${r ? "Uses earlier scans only, so it can run on a live sensor" : "Also uses the scans after, so it needs a recording"}">${r ? "realtime" : "needs later scans"}</span>`; };
+let trainKindSet = false;
 function renderModel() {
   const ms = Object.entries(state.models);
+  if (!trainKindSet && state.config) {       // start on the kind that is installed, else the configured one
+    const cur = ms.length ? isRealtime(ms[0][1].time_offsets) : isRealtime(state.config.time_offsets);
+    $("trainKind").value = cur ? "realtime" : "offline"; trainKindSet = true;
+  }
   $("modelCnt").textContent = ms.length && ms[0][1].trained ? "trained " + fmtWhen(new Date(ms[0][1].trained), false) : "";
   $("model").innerHTML = ms.length ? ms.map(([v, m]) => `
-    <div class="card"><h4 style="color:var(--text)">${v === "xyz" ? "Range only" : "With intensity"}</h4>
+    <div class="card"><h4 style="color:var(--text)">${v === "xyz" ? "Range only" : "With intensity"} ${kindTag(m.time_offsets)}</h4>
       <div class="kv num"><span>complete scans / labels</span><span>${m.summary.train_scans} / ${m.summary.train_labels}</span>
       <span>average precision</span><span>${f3(m.summary.cv_ap)}</span>
       <span>precision / recall at 0.3</span><span>${pc(m.summary.cv_precision)} / ${pc(m.summary.cv_recall)}</span>
@@ -1373,7 +1431,7 @@ function renderStats() {
     y: {fmt: t => t.toFixed(2), tip: t => t.toFixed(3)}});
   $("histTable").innerHTML = h.length ? `<table><tr><th>Run</th><th>When</th><th>Scans</th><th>Labels</th><th>AP range only</th><th>AP intensity</th></tr>` +
     h.map((e, i) => { const x = e.models.xyz || {}, f = e.models.full || {};
-      return `<tr class="num"><td>${i + 1}${e.restored_from ? " (restored)" : ""}</td><td>${fmtWhen(parseStamp(e.time), false)}</td>
+      return `<tr class="num"><td>${i + 1}${e.restored_from ? " (restored)" : ""} ${kindTag(e.time_offsets || x.time_offsets)}</td><td>${fmtWhen(parseStamp(e.time), false)}</td>
         <td>${x.train_scans ?? "–"}</td><td>${x.train_labels ?? "–"}</td><td>${f3(x.cv_ap)}</td><td>${f3(f.cv_ap)}</td></tr>`; }).reverse().join("") + "</table>" : "";
   // by bag
   const pb = rep && rep.cross_validation.per_bag, pp = rep && rep.partly_labelled_scans && rep.partly_labelled_scans.per_bag || {};
@@ -1417,7 +1475,7 @@ async function loadFiles() {
   const when = t => fmtWhen(new Date(t * 1000), false);
   $("filesModels").innerHTML = `<table><tr><th>Model set</th><th>Written</th><th>Size</th><th>Scans</th><th>Labels</th><th>AP range only</th><th>AP intensity</th><th></th></tr>` +
     files.models.map(e => { const x = e.xyz || {}, f = e.full || {};
-      return `<tr class="num ${e.current ? "cur" : ""}"><td>${esc(e.name)}${e.current ? '<span class="tag" style="border-color:var(--ok);color:var(--ok)">in use</span>' : ""}</td>
+      return `<tr class="num ${e.current ? "cur" : ""}"><td>${esc(e.name)} ${kindTag(x.time_offsets)}${e.current ? '<span class="tag" style="border-color:var(--ok);color:var(--ok)">in use</span>' : ""}</td>
         <td>${when(e.mtime)}</td><td>${fmtBytes(e.bytes)}</td><td>${x.train_scans ?? "–"}</td><td>${x.train_labels ?? "–"}</td><td>${f3(x.cv_ap)}</td><td>${f3(f.cv_ap)}</td>
         <td>${e.current ? "" : `${e.usable ? `<button class="mini" data-use="${esc(e.id)}">Use</button> ` : ""}<button class="mini danger" data-del="model" data-id="${esc(e.id)}" data-size="${e.bytes}">Delete</button>`}</td></tr>`; }).join("") + "</table>";
   $("filesExports").innerHTML = files.exports.length ? `<table><tr><th>Export</th><th>Written</th><th>Size</th><th style="text-align:left">Contents</th><th></th></tr>` +
@@ -1440,7 +1498,8 @@ async function loadFiles() {
 // ── modals ───────────────────────────────────────────────────────────────
 const anyModal = () => document.querySelector(".modal.open");
 function openModal(id) { document.querySelectorAll(".modal").forEach(m => m.classList.toggle("open", m.id === id)); }
-function closeModals() { document.querySelectorAll(".modal").forEach(m => m.classList.remove("open")); hideTip(); }
+function closeModals() { if (proj && !proj.open) return;      // the project screen stays until one is open
+  document.querySelectorAll(".modal").forEach(m => m.classList.remove("open")); hideTip(); }
 document.querySelectorAll("[data-close]").forEach(b => b.onclick = closeModals);
 document.querySelectorAll(".modal").forEach(m => m.addEventListener("mousedown", e => { if (e.target === m) closeModals(); }));
 
@@ -1468,7 +1527,7 @@ document.querySelectorAll("#tools button").forEach(b => b.onclick = () => setToo
 $("refreshQueue").onclick = e => { e.preventDefault(); e.stopPropagation(); loadQueue(); };
 $("train").onclick = async () => {
   if (dirty) await save(scan.complete === true);
-  try { await api("/api/train", {threshold: parseFloat($("trainThr").value)}); toast("Training started"); refreshState(); }
+  try { await api("/api/train", {threshold: parseFloat($("trainThr").value), realtime: $("trainKind").value === "realtime"}); toast("Training started"); refreshState(); }
   catch (e) { toast(e.message, 4000); }
 };
 $("chartsBtn").onclick = openStats;
@@ -1590,7 +1649,112 @@ window.addEventListener("keydown", e => {
 window.addEventListener("resize", () => { applyLayout(); redraw(); drawTicks(); renderStats(); });
 window.addEventListener("beforeunload", e => { if (dirty) { e.preventDefault(); e.returnValue = ""; } });
 
+// ── project screen ───────────────────────────────────────────────────────
+let proj = null, pjLook = null, fsTarget = null, fsKind = "dir", pjTimer;
+const pjRow = (path, extra, btn) => `<div class="row"><span style="word-break:break-all">${esc(path)}${extra ? `<br><span class="small">${extra}</span>` : ""}</span>${btn}</div>`;
+async function openProject(forced) {
+  proj = await api("/api/project");
+  const cur = proj.open;
+  $("pjTitle").textContent = cur ? "Project" : "Choose a project";
+  $("pjClose").style.display = cur ? "" : "none";
+  $("pjProblem").textContent = proj.problem || "";
+  $("pjCurrent").innerHTML = cur ? `<h3 style="margin:0 0 4px">Open now</h3>` + pjRow(cur.path,
+      `${esc(cur.sensor)} · ${cur.grid[0]} × ${cur.grid[1]} · ${cur.bags} bags · ${cur.reviewed} reviewed scans`, "") +
+    `<div class="row"><input id="pjCurRoot" type="text" value="${esc(cur.bags_root)}" style="flex:1" title="Folder the Add dialog lists bags from">
+      <button data-browse="pjCurRoot" data-kind="dir">Browse…</button><button id="pjCurSave">Save bags folder</button></div>` : "";
+  $("pjRecent").innerHTML = proj.recent.length ? `<h3 style="margin:14px 0 4px">Recent</h3>` +
+    proj.recent.map(p => pjRow(p, "", `<button data-open="${esc(p)}">Open</button>`)).join("") : "";
+  $("pjSensor").innerHTML = `<option value="">choose…</option>` + proj.sensors.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("") +
+    `<option value="@bag">another lidar: measure it from a recording…</option>`;
+  if (!cur && !$("pjPath").value) { $("pjPath").value = proj.suggest; }
+  $("m-project").querySelectorAll("[data-open]").forEach(b => b.onclick = () => pjOpen(b.dataset.open));
+  $("m-project").querySelectorAll("[data-browse]").forEach(b => b.onclick = () => fsOpen(b.dataset.browse, b.dataset.kind));
+  if (cur) $("pjCurSave").onclick = async () => {
+    try { await api("/api/project/bags_root", {path: $("pjCurRoot").value}); toast("Bags folder saved"); refreshState(); } catch (e) { toast(e.message, 5000); } };
+  $("pjFs").style.display = "none";
+  openModal("m-project"); pjInspect();
+}
+async function pjInspect() {
+  const path = $("pjPath").value.trim();
+  pjLook = null; $("pjGo").disabled = true; $("pjSetup").style.display = $("pjRootRow").style.display = "none";
+  if (!path) { $("pjLook").textContent = ""; return; }
+  let k; try { k = await api("/api/project/inspect?path=" + encodeURIComponent(path)); } catch (e) { $("pjLook").textContent = e.message; return; }
+  if (path !== $("pjPath").value.trim()) return;
+  pjLook = k;
+  if (k.error && !k.ready) $("pjLook").textContent = k.error.split("\n")[0].startsWith("No sensor profile") ? "" : k.error;
+  if (k.ready) {
+    $("pjLook").textContent = `Existing project · ${k.sensor}${k.labels ? " · has labels" : ""}`;
+    $("pjGo").textContent = "Open"; $("pjGo").disabled = !!(proj.open && proj.open.path === k.path);
+  } else if (!k.error || k.error.startsWith("No sensor profile")) {
+    $("pjLook").textContent = k.exists ? "This folder is not set up yet. Choose the lidar:" : "This folder will be created. Choose the lidar:";
+    $("pjSetup").style.display = $("pjRootRow").style.display = "";
+    if (k.bags_root && !$("pjRoot").value) $("pjRoot").value = k.bags_root;
+    $("pjGo").textContent = "Set up and open"; pjSensorChanged();
+  }
+}
+function pjSensorChanged() {
+  const v = $("pjSensor").value;
+  $("pjMeasure").style.display = v === "@bag" ? "" : "none";
+  $("pjGo").disabled = !(pjLook && !pjLook.ready && (v && v !== "@bag" || v === "@bag" && $("pjBag").value.trim()));
+}
+async function pjBagChanged() {
+  pjSensorChanged();
+  const bag = $("pjBag").value.trim(); $("pjTopicRow").style.display = "none";
+  if (!bag) return;
+  try {
+    const ts = await api("/api/project/topics?path=" + encodeURIComponent(bag));
+    if (bag !== $("pjBag").value.trim()) return;
+    $("pjTopic").innerHTML = ts.map(t => `<option value="${esc(t.name)}">${esc(t.name)} · ${t.count} scans</option>`).join("");
+    $("pjTopicRow").style.display = ts.length > 1 ? "" : "none";
+    if (!ts.length) toast("That recording has no point cloud topic", 4000);
+  } catch (e) { $("pjTopic").innerHTML = ""; }
+}
+async function pjOpen(path) {
+  $("pjBusy").textContent = "Opening…";
+  try { await api("/api/project/open", {path}); location.href = location.pathname; }
+  catch (e) { $("pjBusy").textContent = ""; toast(e.message, 6000); }
+}
+$("pjGo").onclick = async () => {
+  if (!pjLook) return;
+  if (pjLook.ready) return pjOpen(pjLook.path);
+  const v = $("pjSensor").value, body = {path: $("pjPath").value.trim(), bags_root: $("pjRoot").value.trim() || null};
+  if (v === "@bag") { body.sensor_bag = $("pjBag").value.trim(); body.sensor_topic = $("pjTopic").value || null; } else body.sensor = v;
+  $("pjGo").disabled = true; $("pjBusy").textContent = v === "@bag" ? "Measuring the lidar from the recording…" : "Setting up…";
+  try { await api("/api/project/create", body); location.href = location.pathname; }
+  catch (e) { $("pjBusy").textContent = ""; $("pjGo").disabled = false; toast(e.message, 8000); }
+};
+$("pjPath").oninput = () => { clearTimeout(pjTimer); pjTimer = setTimeout(pjInspect, 300); };
+$("pjSensor").oninput = pjSensorChanged;
+$("pjBag").oninput = () => { clearTimeout(pjTimer); pjTimer = setTimeout(pjBagChanged, 300); };
+// A small folder browser: the page cannot open the system's own file dialog for paths on the server side.
+async function fsOpen(target, kind, path) {
+  fsTarget = target; fsKind = kind;
+  let start = path ?? $(target).value.trim();
+  if (path == null && kind === "bag" && start) start = start.replace(/\/[^\/]*$/, "") || "/";
+  let d; try { d = await api("/api/fs?path=" + encodeURIComponent(start || (proj && proj.home) || "")); } catch (e) { return toast(e.message, 4000); }
+  $("pjFs").style.display = ""; $("fsPath").textContent = d.path; $("fsUse").style.display = kind === "dir" ? "" : "none";
+  const join = n => (d.path.endsWith("/") ? d.path : d.path + "/") + n;
+  $("fsList").innerHTML = (d.parent ? `<div class="row" data-d="${esc(d.parent)}"><span>‥ (up)</span></div>` : "") +
+    d.dirs.map(n => `<div class="row" data-d="${esc(join(n))}"><span>📁 ${esc(n)}</span></div>`).join("") +
+    (kind === "bag" ? d.bags.map(n => `<div class="row" data-f="${esc(join(n))}"><span>${esc(n)}</span><button class="mini">Choose</button></div>`).join("") : "") ||
+    '<div class="small">Empty folder.</div>';
+  $("fsList").querySelectorAll("[data-d]").forEach(r => { r.style.cursor = "pointer"; r.onclick = () => fsOpen(target, kind, r.dataset.d); });
+  $("fsList").querySelectorAll("[data-f]").forEach(r => r.onclick = () => fsPick(r.dataset.f));
+  $("fsUse").onclick = () => fsPick(d.path);
+  $("pjFs").scrollIntoView({block: "nearest"});
+}
+function fsPick(path) {
+  const el = $(fsTarget); el.value = path; $("pjFs").style.display = "none";
+  if (el.oninput) el.oninput();
+}
+$("fsCancel").onclick = () => $("pjFs").style.display = "none";
+$("projBtn").onclick = async () => { if (dirty && scan) await save(scan.complete === true); openProject(); };
+
 (async function start() {
+  proj = await api("/api/project");
+  if (!proj.open) {                  // nothing to show yet: the project screen stays up until one is open
+    return openProject(true);
+  }
   $("colour").value = ui.colour; $("vflip").checked = ui.vflip; $("hflip").checked = ui.hflip; $("shift").value = ui.shift;
   applyLayout(); setTool(ui.tool);
   initGL();

@@ -15,6 +15,12 @@ Two models are produced:
                            annotated (reduced) bags; scans are paired by
                            header stamp.
 
+By default a return is judged with the two scans before and the two after
+it. A model for a live sensor cannot wait for later scans: train it with
+--time-offsets -2 -1 (the app's "realtime" choice) and it uses earlier scans
+only. The offsets are stored in the model, and everything that applies it
+(classify_bag.py, the app) follows them.
+
 Each model is cross-validated first (5 folds, grouped into 10 s chunks of
 bag time so near-identical neighbouring scans never straddle a fold), then
 refit on everything. The cross-validation report is written next to the
@@ -551,6 +557,7 @@ def main():
         "excluded_scans": sorted(f"{b}:{s}" for b, s in excl_scans),
         "sensor": sg.PROFILE.get("name", ""),
         "rounds": N_ROUNDS,
+        "time_offsets": list(args.time_offsets),
     }
     names = af.feature_names(args.time_offsets, False)
     train_variant("xyz", X, y, groups, scan_key, aug, explicit, stamp, names, args, meta)
