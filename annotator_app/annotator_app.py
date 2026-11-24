@@ -742,6 +742,23 @@ class App:
         self.stats_cache.clear()
         return {"ok": True}
 
+    # ── driver: the models it ships ─────────────────────────────────────────
+    def driver_status(self) -> dict:
+        """The driver's default models next to the installed ones."""
+        import publish_model
+        return publish_model.status(self.cfg["driver"], self.args.model_dir)
+
+    def publish_to_driver(self, variants: list[str]) -> dict:
+        """Make the installed models the driver's defaults (publish_model.py)."""
+        import publish_model
+        if self.jobs.running("train"):
+            raise ValueError("training is running")
+        if not variants or any(v not in publish_model.VARIANTS for v in variants):
+            raise ValueError("choose the models to publish")
+        with self.model_lock:
+            results = publish_model.publish(self.cfg["driver"], self.args.model_dir, variants)
+        return {"published": results, "status": self.driver_status()}
+
     # ── scan payload ────────────────────────────────────────────────────────
     def scan(self, name: str, i: int, ctx: int) -> dict:
         c = self.cache(name)
@@ -1316,6 +1333,7 @@ def make_handler(hub: Hub):
                 "/api/accuracy": lambda: app.bag_accuracy(q["bag"]),
                 "/api/files": lambda: app.files(),
                 "/api/topics": lambda: app.topics(q["path"]),
+                "/api/driver": lambda: app.driver_status(),
             }
             if u.path in routes:
                 return self._run(routes[u.path])
@@ -1345,6 +1363,7 @@ def make_handler(hub: Hub):
                 "/api/ledger/compact": lambda: app.compact_ledger(),
                 "/api/files/delete": lambda: app.delete_file(body["kind"], body["id"]),
                 "/api/models/use": lambda: app.use_model(body["id"]),
+                "/api/driver/publish": lambda: app.publish_to_driver(body.get("variants") or []),
                 "/api/train": lambda: {"job": app.train(float(body.get("threshold", 0.3)),
                                                          body.get("realtime"))},
                 "/api/export": lambda: {"job": app.export(body["bag"], body.get("threshold"))},

@@ -20,7 +20,7 @@ before larger changes, and add a section for each one.
 | `ghost_tester/` | ROS 2 C++ package: `artifact_filter_node` (example) and `artifact_filter_check` (C++ vs Python) |
 | `ghost_annotation/` | the earlier Foxglove and joystick annotator |
 | `csm_utils/`, `launch_utils/` | git submodules |
-| `multiscan_driver/`, `csm_metrics/` | git submodules (once added) |
+| `multiscan_driver/`, `csm_metrics/` | git submodules: the driver owns the classifier and the default models |
 
 ## The classifier lives in multiscan_driver
 
@@ -41,9 +41,13 @@ before larger changes, and add a section for each one.
 - The model file format is versioned (`lidar_artifact_model 1`, see
   `export_model.py`). Changing it means changing the driver's `model.hpp`
   in step and bumping the version.
-- `annotator_app/publish_model.py` makes trained models the driver's
-  defaults. They must be realtime models (earlier scans only) with early
-  exit checkpoints: the driver filters live scans on one core.
+- Publishing makes the installed models the driver's defaults by copying
+  them into the driver's `models/` (the `multiscan_driver` submodule, or the
+  project's `driver` setting). Do it with Files -> "Publish to driver…" in
+  the app, or with `annotator_app/publish_model.py`; both use the same
+  functions in that script. Only realtime models (earlier scans only) with
+  early exit checkpoints can be published: the driver filters live scans on
+  one core. Commit the models in the driver, then the submodule pointer.
 
 ## Environment
 
@@ -62,8 +66,9 @@ before larger changes, and add a section for each one.
 The reference is the LANCE package (`src/lance/src` of the robot
 workspace): code should read like it. These rules apply to all C++ in
 this repository and in multiscan_driver.
-This section is the same in both repositories' `AGENTS.md`: change both
-together.
+
+The same section is in multiscan_driver's `AGENTS.md` and the LANCE
+workspace's: keep them in step.
 
 ### Formatting
 
@@ -101,7 +106,6 @@ together.
   - variables and members: `snake_case`;
   - constants: `UPPER_SNAKE_CASE`;
   - enums: `enum class` with `PascalCase` values.
-- Name a lambda like a function (`readList`, `isFloat32`).
 
 ### Functions
 
@@ -112,6 +116,22 @@ together.
 - If a function stays long, label its parts with `// --- Step ---` comments.
 - Structure control flow plainly: early returns instead of deep nesting, and
   no `goto`.
+
+### Macros over lambdas
+
+- For a small piece of code repeated inside a function or file, prefer a
+  macro to a local lambda: declaring parameters, filling fields, repeated
+  checks with an early `return` (`EXIT_IF_INSUFFICIENT_SIZE`), or anything
+  that needs a name as a string (`#name`). The LANCE package does this
+  (`INIT_PARAM`, `ADD_MARKER`, `SET_BOUNDS`).
+- Name macros in `UPPER_SNAKE_CASE`. Define them just above their first
+  use, and `#undef` them when they are no longer needed. Wrap a multi-line
+  body in braces, and put macro arguments in parentheses inside the body.
+- Use a real function when the code is longer, needs its own types or
+  locals, or is called from more than one file.
+- Lambdas are still right where a callable is required: callbacks, thread
+  bodies and sort comparators. Name a stored lambda like a function
+  (`readList`, `isFloat32`).
 
 ### Classes and headers
 

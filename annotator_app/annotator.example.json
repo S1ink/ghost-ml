@@ -6,6 +6,7 @@
   "default_topic": "/multiscan/lidar_scan",
   "lidar_frame": null,
   "port": 8765,
+  "driver": null,
 
   "paths": { "ledger": "annotations.jsonl" },
   "queue": { "stride": 5, "min_gap_s": 2.0, "length": 40 },

@@ -56,6 +56,11 @@ DEFAULTS = {
     "host": "127.0.0.1",
     "port": 8765,
 
+    # The multiscan-driver repository trained models are published to (its
+    # models/ folder holds the driver's default models). None = the
+    # submodule next to this folder (src/multiscan_driver).
+    "driver": None,
+
     "paths": {
         "ledger": "annotations.jsonl",
         "registry": "datasets.json",
@@ -177,6 +182,8 @@ def load(project: str = ".", config: str | None = None, sensor: str | None = Non
     cfg["config_file"] = path if os.path.exists(path) else None
     cfg["paths"] = {k: absolute(v) for k, v in cfg["paths"].items()}
     cfg["bags_root"] = absolute(cfg["bags_root"]) if cfg["bags_root"] else project
+    cfg["driver"] = (absolute(cfg["driver"]) if cfg["driver"]
+                     else os.path.join(os.path.dirname(HERE), "multiscan_driver"))
     cfg["bag_extensions"] = [e.lower() for e in cfg["bag_extensions"]]
 
     if need_sensor:

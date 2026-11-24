@@ -356,6 +356,11 @@
     <div class="small" style="margin-bottom:4px">Every training run keeps the models it replaced. “Use” installs an
       older set again (the current one is kept). Deleting is permanent.</div>
     <div id="filesModels"></div>
+    <h4 style="margin:18px 0 4px">Driver defaults <span class="small" id="driverDir"></span></h4>
+    <div class="small" style="margin-bottom:4px">The multiScan driver ships default models and loads them by name.
+      Publishing copies the models in use into its <code>models/</code> folder. Only realtime models with early exit
+      can be published. Then rebuild the driver, run its tests and commit the models there.</div>
+    <div id="driverBox"></div>
     <h4 style="margin:18px 0 4px">Exports <span class="small" id="outDir"></span></h4>
     <div class="small" style="margin-bottom:4px">Classified bags and score files. Open the
       <code>…_classified</code> folder of an export in Foxglove. Deleting is permanent.</div>
@@ -490,7 +495,9 @@
       what an export flags. The <b>default threshold</b> next to Train is stored in the model.</p>
     <h3>Files</h3>
     <p><b>Manage files…</b> lists every model set and every export with its date, size and contents. Delete what
-      you no longer need, or put an older model back with “Use”. The label ledger and the scan cache are never touched from there.</p>
+      you no longer need, or put an older model back with “Use”. The label ledger and the scan cache are never touched from there.
+      <b>Publish to driver…</b> makes the models in use the multiScan driver's defaults (the <code>multiscan_driver</code>
+      submodule, or the <code>driver</code> setting).</p>
     <h3>Panels</h3>
     <p>Drag the bar between the sidebar and the views, or between the range image and the 3D view, to resize.
       Double-click a bar to reset it. Sidebar sections fold when you click their heading.</p>
@@ -1482,6 +1489,7 @@ async function loadFiles() {
     $("ledgerCompact").disabled = extra <= 0;
   }
   if (!$("m-files").classList.contains("open")) return;
+  loadDriver();
   $("modelDir").textContent = files.model_dir; $("outDir").textContent = files.out_dir;
   const when = t => fmtWhen(new Date(t * 1000), false);
   $("filesModels").innerHTML = `<table><tr><th>Model set</th><th>Written</th><th>Size</th><th>Scans</th><th>Labels</th><th>AP range only</th><th>AP intensity</th><th></th></tr>` +
@@ -1504,6 +1512,37 @@ async function loadFiles() {
     try { await api("/api/models/use", {id: b.dataset.use}); toast("Model installed"); } catch (e) { toast(e.message, 4000); return; }
     await refreshState(); loadFiles(); loadReports(); loadQueue(); loadAccSoon(300); if (scan) loadScan(scan.i, true);
   });
+}
+
+// ── driver defaults ──────────────────────────────────────────────────────
+const VARIANT_NAMES = {full: "with intensity", xyz: "range only"};
+const fmtTrained = t => t ? esc(String(t).slice(0, 16).replace("T", " ")) : "–";
+async function loadDriver() {
+  let d;
+  try { d = await api("/api/driver"); } catch (e) { $("driverBox").innerHTML = `<div class="small">${esc(e.message)}</div>`; return; }
+  $("driverDir").textContent = d.driver;
+  if (!d.found) { $("driverBox").innerHTML = `<div class="small">${esc(d.problem)}</div>`; return; }
+  const rows = Object.entries(d.variants).map(([v, e]) => {
+    const state = e.problem ? `<span class="small">${esc(e.problem)}</span>`
+      : e.same ? '<span class="tag" style="border-color:var(--ok);color:var(--ok)">published</span>'
+      : `<label><input type="checkbox" data-publish="${v}" checked> publish</label>`;
+    return `<tr class="num"><td>${VARIANT_NAMES[v] || v}</td><td>${fmtTrained(e.project_trained)}</td>
+      <td>${fmtTrained(e.driver_trained)}</td><td style="text-align:left">${state}</td></tr>`; }).join("");
+  const pending = Object.values(d.variants).some(e => !e.problem && !e.same);
+  const changed = d.uncommitted.length ? `<div class="small" style="margin-top:4px">Not committed in the driver yet:
+    ${d.uncommitted.map(f => `<code>${esc(f)}</code>`).join(", ")}</div>` : "";
+  $("driverBox").innerHTML = `<table><tr><th>Model</th><th>In use here (trained)</th><th>Driver's default (trained)</th><th></th></tr>${rows}</table>
+    <div class="row" style="margin-top:6px"><button id="driverPublish" ${pending ? "" : "disabled"}>Publish to driver…</button></div>${changed}`;
+  $("driverPublish").onclick = async () => {
+    const variants = [...document.querySelectorAll("#driverBox [data-publish]:checked")].map(b => b.dataset.publish);
+    if (!variants.length) return toast("Choose the models to publish");
+    if (!confirm(`Copy the ${variants.map(v => VARIANT_NAMES[v]).join(" and ")} model into\n${d.driver}/models?\n\nThe driver's current defaults are replaced (git keeps them until you commit).`)) return;
+    try {
+      const r = await api("/api/driver/publish", {variants});
+      toast(`Published ${r.published.map(p => VARIANT_NAMES[p.variant]).join(" and ")}. Rebuild and test the driver, then commit there.`, 6000);
+    } catch (e) { toast(e.message, 5000); }
+    loadDriver();
+  };
 }
 
 // ── modals ───────────────────────────────────────────────────────────────

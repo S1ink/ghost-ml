@@ -170,12 +170,17 @@ or by building on top of a workspace that has it (the robot's), e.g.
 `source <lance-ws>/install/setup.bash` before `./src/build_ros.sh`.
 
 To make newly trained models the robot's defaults, publish them into the
-driver, then rebuild and test it and commit the models there:
+driver, then rebuild and test it and commit the models there. In the app,
+open Files ("Manage files…"): "Driver defaults" compares the models in use
+with the driver's and has a "Publish to driver…" button. Or from a shell:
 
 ```bash
 source .venv/bin/activate
 python3 src/annotator_app/publish_model.py      # --driver <path> if not the submodule
 ```
+
+Both publish into the `multiscan_driver` submodule unless the project's
+`annotator.json` sets `"driver"` to another checkout.
 
 `publish_model.py` copies `models/artifact_full.*` and
 `models/artifact_xyz.*` (model and training report) after checking that
