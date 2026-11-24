@@ -4,8 +4,9 @@ export_model.py
 
 Writes a trained model as one plain text file that needs no Python to use:
 the trees, plus every setting needed to turn a point cloud into the features
-the trees expect (sensor grid, feature settings, threshold). The C++ example
-in ghost_tester (include/artifact_filter/artifact_filter.hpp) reads it.
+the trees expect (sensor grid, feature settings, threshold). The C++
+classifier in multiscan_driver (include/multiscan_driver/artifact_filter/)
+reads it; publish_model.py makes it the driver's default.
 
     python3 export_model.py [--project DIR] [--variant xyz|full] [-o FILE]
     python3 export_model.py --model path/to/artifact_xyz.joblib [-o FILE]

@@ -18,6 +18,8 @@
   <depend>tf2_ros</depend>
   <depend>tf2_sensor_msgs</depend>
   <depend>tf2_geometry_msgs</depend>
+  <!-- the artifact filter header (include/multiscan_driver/artifact_filter/) -->
+  <build_depend>multiscan_driver</build_depend>
 
   <exec_depend>launch_utils</exec_depend>
   <exec_depend>foxglove_bridge</exec_depend>
