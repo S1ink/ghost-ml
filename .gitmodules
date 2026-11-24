@@ -4,3 +4,9 @@
 [submodule "csm_utils"]
 	path = csm_utils
 	url = https://github.com/Cardinal-Space-Mining/csm-utils
+[submodule "multiscan_driver"]
+	path = multiscan_driver
+	url = https://github.com/Cardinal-Space-Mining/multiscan-driver
+[submodule "csm_metrics"]
+	path = csm_metrics
+	url = https://github.com/Cardinal-Space-Mining/csm-metrics

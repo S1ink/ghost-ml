@@ -7,10 +7,11 @@ scans.
 | folder | what it is |
 | --- | --- |
 | `annotator_app/` | the web app: label bags, train, review, export. Plain Python, not a ROS package. [README](annotator_app/README.md) |
-| `ghost_tester/` | ROS 2 C++ package with the realtime filter example (`artifact_filter_node`) |
+| `ghost_tester/` | ROS 2 C++ package with the realtime filter example (`artifact_filter_node`) and the C++/Python check, built against `multiscan_driver` |
 | `ghost_annotation/` | the earlier Foxglove and joystick annotator (ROS 2 package) |
 | `launch_utils/` | launch helpers (git submodule) |
 | `csm_utils/` | shared C++ utility headers and CMake helpers, used by `ghost_tester` (git submodule) |
+| `multiscan_driver/`, `csm_metrics/` | the multiScan driver, which owns the C++ classifier and ships the default models, and its metrics dependency (git submodules, see [The driver](#the-driver)) |
 
 ## Quick start
 
@@ -107,20 +108,21 @@ on the target, fewer trees (`"training": {"rounds": 300}` in
 `annotator.json`) cost time in proportion and a little accuracy.
 
 To use the classifier in your own node, include
-`ghost_tester/include/artifact_filter/artifact_filter.hpp`. It is one
-header with no dependencies beyond the standard library:
+`<multiscan_driver/artifact_filter/filter.hpp>` (from the `multiscan_driver`
+package). It is header only, with no dependencies beyond the standard
+library:
 
 ```cpp
-artifact_filter::Filter filter(artifact_filter::Model::load(path));
+artifact_filter::Filter filter{artifact_filter::Model::load(path)};
+filter.setEarlyExit(true);  // optional: several times faster, see Speed
 // for every scan, in order:
-filter.early_exit(true);    // optional: several times faster, see Speed
-filter.process(xyz, n_points, intensity_or_null, stamp_ns, point_prob);
-// point_prob[i] >= filter.model().threshold  ->  point i is an artifact
+filter.process(xyz, num_points, intensity_or_null, stamp_ns, point_probability);
+// point_probability[i] >= filter.model().threshold  ->  point i is an artifact
 ```
 
 A lidar that sends each scan in pieces (the multiScan sends 12 UDP segments
 per revolution) can feed them as they arrive: `begin`, then per piece `add`,
-`cover` for every beam it carried and `classify_ready`, then `finish`. A
+`cover` for every beam it carried and `classifyReady`, then `finish`. A
 cell is classified as soon as every cell its inputs look at is complete, so
 only the cells next to the last piece are left when the scan ends. The
 result is identical to `process` (which is built on these calls). On the
@@ -140,7 +142,44 @@ ros2 run ghost_tester artifact_filter_check models/artifact_xyz.model.txt /tmp/c
 
 This compares the C++ result with Python's for the same scans, and prints
 the time per scan with and without early exit and whether early exit
-changed any decision.
+changed any decision. Run it after changing `artifact_features.py` or
+`scan_grid.py` here, or the header in the driver.
+
+## The driver
+
+The robot runs the classifier inside `multiscan_driver` (its
+`ghost_filter.*` parameters), which filters every frame segment by segment
+as the sensor sends it. The driver owns the C++ side:
+
+- `include/multiscan_driver/artifact_filter/`: the classifier, which
+  `ghost_tester` builds against, so the tools here run exactly the code
+  the robot runs;
+- `models/`: the default models (`artifact_full`, `artifact_xyz`), which
+  it installs and loads by name.
+
+So this workspace depends on the driver, and the robot needs nothing from
+here. Get the driver either as submodules of this repository:
+
+```bash
+cd <workspace>/src
+git submodule add https://github.com/Cardinal-Space-Mining/multiscan-driver multiscan_driver
+git submodule add https://github.com/Cardinal-Space-Mining/csm-metrics csm_metrics
+```
+
+or by building on top of a workspace that has it (the robot's), e.g.
+`source <lance-ws>/install/setup.bash` before `./src/build_ros.sh`.
+
+To make newly trained models the robot's defaults, publish them into the
+driver, then rebuild and test it and commit the models there:
+
+```bash
+source .venv/bin/activate
+python3 src/annotator_app/publish_model.py      # --driver <path> if not the submodule
+```
+
+`publish_model.py` copies `models/artifact_full.*` and
+`models/artifact_xyz.*` (model and training report) after checking that
+they are realtime models with early exit checkpoints.
 
 ## Other scripts
 
@@ -151,3 +190,4 @@ changed any decision.
 | `build_ros.sh` | `colcon build` of the ROS packages (run from the workspace) |
 | `run_filter.sh` | launches the C++ filter, usually with `bag:=<recording>` |
 | `run_ros.sh` | launches the earlier Foxglove annotator |
+| `annotator_app/publish_model.py` | makes the trained models the driver's defaults |

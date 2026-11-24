@@ -11,6 +11,9 @@ find_package(pcl_conversions REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_sensor_msgs REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+# the artifact filter (header only): multiscan_driver owns it, so the tools
+# here run exactly the code the driver filters with
+find_package(multiscan_driver REQUIRED)
 
 find_package(PCL REQUIRED)
 find_package(Eigen3 REQUIRED)
@@ -48,8 +51,9 @@ target_link_libraries(test_node
     Eigen3::Eigen
     ${PCL_LIBRARIES} )
 
-# Lidar artifact filter example. include/artifact_filter/artifact_filter.hpp
-# is self-contained (no ROS, no PCL); OpenMP only makes it faster.
+# Lidar artifact filter example. <multiscan_driver/artifact_filter/filter.hpp>
+# needs only the standard library (no ROS, no PCL); OpenMP only makes it
+# faster.
 find_package(OpenMP)
 
 add_executable(artifact_filter_node
@@ -57,10 +61,14 @@ add_executable(artifact_filter_node
 auto_target_dependencies(artifact_filter_node
     rclcpp
     sensor_msgs )
+target_include_directories(artifact_filter_node PRIVATE
+    ${multiscan_driver_INCLUDE_DIRS} )
 
 # Compares the C++ against Python on a check file (no ROS).
 add_executable(artifact_filter_check
     "src/artifact_filter_check.cpp" )
+target_include_directories(artifact_filter_check PRIVATE
+    ${multiscan_driver_INCLUDE_DIRS} )
 
 if(OpenMP_CXX_FOUND)
     target_link_libraries(artifact_filter_node OpenMP::OpenMP_CXX)
