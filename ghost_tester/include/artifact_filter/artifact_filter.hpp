@@ -10,6 +10,10 @@
  *     filter.process(xyz, n_points, intensity_or_null, stamp_ns, point_prob);
  *     // point_prob[i] >= filter.model().threshold  ->  point i is an artifact
  *
+ * A scan can also be fed in pieces as the lidar sends it (begin, add, cover,
+ * classify_ready, finish; see Filter::begin): cells are classified as soon
+ * as their inputs are complete, so little work is left when the scan ends.
+ *
  * The model file is written by annotator_app (artifact_<variant>.model.txt
  * next to every trained model, or export_model.py). It carries the trees and
  * every setting used to build their inputs, so nothing here is specific to
@@ -29,6 +33,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -319,6 +324,13 @@ public:
         this->history.resize(static_cast<size_t>(this->depth));
         this->min_range_mm =
             static_cast<int>(std::lround(this->m.min_range_m * 1000.));
+        // cells whose neighbourhood contains a cell (and the other way round)
+        int span = 1;
+        for (const int dr : this->m.ring_offsets) { span = std::max(span, std::abs(dr)); }
+        this->nb_rings = span;
+        span = 2;                                   // box3x5 reaches 2 columns
+        for (const int dc : this->m.col_offsets) { span = std::max(span, std::abs(dc)); }
+        this->nb_cols = span;
     }
 
     const Model& model() const { return this->m; }
@@ -353,90 +365,61 @@ public:
         std::vector<float>& point_prob,
         double threshold = -1.)
     {
-        if (this->m.use_intensity && !intensity)
-        {
-            throw std::invalid_argument(
-                "artifact_filter: this model needs intensity, the scan has none "
-                "(use the range-only model, artifact_xyz)");
-        }
-        if (threshold < 0.) { threshold = this->m.threshold; }
+        this->begin(stamp_ns);
+        this->add(n_points, xyz, 3 * sizeof(float), intensity, sizeof(float));
+        return this->finish(point_prob, threshold);
+    }
 
-        const int R = this->m.rings, C = this->m.cols;
+    // ── The same scan fed in pieces, as a lidar sends it ────────────────────
+    //
+    //     filter.begin(stamp_ns);
+    //     for every piece (e.g. a network packet):
+    //         filter.add(n, xyz, xyz_step, intensity, intensity_step);
+    //         for every beam the piece carries, return or not:
+    //             filter.cover(filter.cell_at(azimuth_deg, elevation_deg));
+    //         filter.classify_ready();
+    //     filter.finish(point_prob);
+    //
+    // A cell is classified as soon as every cell its inputs look at is
+    // covered, so most of the work is done before the last piece arrives.
+    // The result is identical to process() on all points in the same order:
+    // cover() only tells the filter that no more returns will come for a
+    // cell. Covering a cell that still gets returns later breaks that; cells
+    // never covered are handled in finish().
+
+    /** Starts a scan. */
+    void begin(int64_t stamp_ns)
+    {
         const float nan = std::numeric_limits<float>::quiet_NaN();
-
-        // 1. Points -> grid cells; the nearest return of a cell wins.
-        this->cell.assign(n_points, -1);
+        const int R = this->m.rings;
+        this->cell.clear();
+        this->range_pt.clear();
         this->nearest.assign(this->n_cells, std::numeric_limits<double>::infinity());
         this->range_mm.assign(this->n_cells, 0);
         this->inten.assign(this->m.use_intensity ? this->n_cells : 0, 0);
-        this->range_pt.resize(n_points);
-        for (size_t i = 0; i < n_points; i++)
-        {
-            const double x = xyz[3 * i], y = xyz[3 * i + 1], z = xyz[3 * i + 2];
-            const double xy = std::hypot(x, y);
-            const double rng = std::hypot(xy, z);
-            this->range_pt[i] = rng;
-            if (!std::isfinite(rng) || !(rng > 1e-4)) { continue; }
-
-            const double elev = std::atan2(z, xy) * RAD2DEG;
-            int k = 0;
-            double best = std::abs(elev - this->m.layer_elev_deg[0]);
-            for (int j = 1; j < R; j++)
-            {
-                const double d = std::abs(elev - this->m.layer_elev_deg[j]);
-                if (d < best) { best = d; k = j; }
-            }
-            const double az = std::atan2(y, x) * RAD2DEG;
-            // nearbyint: round half to even, as numpy does
-            const long idx = static_cast<long>(
-                std::nearbyint((az - this->m.layer_az0_deg[k]) / this->m.col_deg));
-            const int col = static_cast<int>(mod(idx + this->m.col0[k], C));
-            const int ring = (R - 1) - k;
-            const int32_t c = ring * C + col;
-            this->cell[i] = c;
-            if (rng <= this->nearest[c])
-            {
-                this->nearest[c] = rng;
-                this->range_mm[c] = static_cast<uint16_t>(
-                    std::clamp(std::nearbyint(rng * 1000.), 0., 65535.));
-                if (this->m.use_intensity)
-                {
-                    double v = intensity[i];
-                    if (this->m.intensity_max != 65535.)
-                    {
-                        v = std::nearbyint(v * (65535. / this->m.intensity_max));
-                    }
-                    this->inten[c] =
-                        static_cast<uint16_t>(std::clamp(v, 0., 65535.));
-                }
-            }
-        }
-
-        // 2. log range per cell; NaN = nothing to classify there
-        std::vector<float>& logr = this->current.logr;
-        logr.resize(this->n_cells);
-        this->rng_m.resize(this->n_cells);
-        this->cand.clear();
-        for (size_t c = 0; c < this->n_cells; c++)
-        {
-            if (this->range_mm[c] < this->min_range_mm)
-            {
-                this->rng_m[c] = nan;
-                logr[c] = nan;
-                continue;
-            }
-            this->rng_m[c] = static_cast<float>(this->range_mm[c]) / 1000.f;
-            // In double, then rounded: a float log differs in the last bit
-            // between libraries, and that bit can flip a tree's decision
-            // (the Python does the same, see artifact_features._log).
-            logr[c] = static_cast<float>(std::log(static_cast<double>(this->rng_m[c])));
-            this->cand.push_back(static_cast<int32_t>(c));
-        }
+        this->current.logr.assign(this->n_cells, nan);
         this->current.stamp = stamp_ns;
         this->current.valid = true;
+        this->rng_m.assign(this->n_cells, nan);
+        this->cell_prob.assign(this->n_cells, 0.f);
+        this->covered.assign(this->n_cells, 0);
+        this->done.assign(this->n_cells, 0);
+        this->missing.resize(this->n_cells);
+        for (int r = 0; r < R; r++)
+        {
+            const int rings =
+                std::min(r + this->nb_rings, R - 1) - std::max(r - this->nb_rings, 0) + 1;
+            std::fill_n(this->missing.begin() + static_cast<long>(r) * this->m.cols,
+                        this->m.cols, rings * (2 * this->nb_cols + 1));
+        }
+        this->ready.clear();
+        if (this->keep_feats)
+        {
+            this->feats.assign(this->n_cells * static_cast<size_t>(this->m.n_features), nan);
+        }
 
-        // 3. Earlier scans that are close enough in time to compare with
-        //    (history[k - 1] is the scan k steps back).
+        // Earlier scans that are close enough in time to compare with
+        // (history[k - 1] is the scan k steps back).
         const size_t n_dt = this->m.time_offsets.size();
         this->prev.assign(n_dt, nullptr);
         this->unstable.resize(n_dt);
@@ -447,51 +430,160 @@ public:
             const Scan& h = this->history[static_cast<size_t>(back - 1)];
             const int64_t gap = stamp_ns > h.stamp ? stamp_ns - h.stamp : h.stamp - stamp_ns;
             if (h.valid && gap <= back * this->m.max_dt_ns) { this->prev[t] = &h.logr; }
-
-            if (back != 1) { continue; }
-            // Which cells changed against the scan just before: present in
-            // both with another range, or present now and absent then.
-            this->unstable[t].assign(this->n_cells, 0);
-            this->gone[t].assign(this->n_cells, 0);
-            for (size_t c = 0; c < this->n_cells; c++)
+            if (back == 1)
             {
-                if (std::isnan(logr[c])) { continue; }
-                const float then = this->prev[t] ? (*this->prev[t])[c] : nan;
-                if (std::isnan(then)) { this->gone[t][c] = 1; }
-                else if (std::abs(then - logr[c]) > this->m.close_log)
-                {
-                    this->unstable[t][c] = 1;
-                }
+                this->unstable[t].assign(this->n_cells, 0);
+                this->gone[t].assign(this->n_cells, 0);
             }
         }
+    }
 
-        // 4. Features and trees for every candidate cell
-        this->cell_prob.assign(this->n_cells, 0.f);
-        const int F = this->m.n_features;
-        if (this->keep_feats) { this->feats.assign(this->n_cells * static_cast<size_t>(F), nan); }
-        const long n_cand = static_cast<long>(this->cand.size());
-#ifdef _OPENMP
-        #pragma omp parallel
-#endif
+    /**
+     * Adds n points of the scan. xyz: x y z floats of the first point, the
+     * next one xyz_step bytes further; intensity likewise (nullptr: none,
+     * which only a model without intensity accepts). Points keep their order
+     * across calls: finish() reports them in the order they were added.
+     */
+    void add(
+        size_t n,
+        const float* xyz,
+        size_t xyz_step,
+        const float* intensity,
+        size_t intensity_step)
+    {
+        if (this->m.use_intensity && !intensity && n)
         {
-            std::vector<float> x(static_cast<size_t>(F));
-#ifdef _OPENMP
-            #pragma omp for schedule(static)
-#endif
-            for (long i = 0; i < n_cand; i++)
+            throw std::invalid_argument(
+                "artifact_filter: this model needs intensity, the scan has none "
+                "(use the range-only model, artifact_xyz)");
+        }
+        const auto* px = reinterpret_cast<const uint8_t*>(xyz);
+        const auto* pi = reinterpret_cast<const uint8_t*>(intensity);
+        for (size_t i = 0; i < n; i++, px += xyz_step, pi += intensity_step)
+        {
+            // Points -> grid cells; the nearest return of a cell wins.
+            float p[3];
+            std::memcpy(p, px, sizeof(p));
+            const double x = p[0], y = p[1], z = p[2];
+            const double xy = std::hypot(x, y);
+            const double rng = std::hypot(xy, z);
+            this->range_pt.push_back(rng);
+            if (!std::isfinite(rng) || !(rng > 1e-4))
             {
-                const int32_t c = this->cand[static_cast<size_t>(i)];
-                this->features(c / C, c % C, x.data());
-                this->cell_prob[static_cast<size_t>(c)] = this->m.predict(x.data(), this->early);
-                if (this->keep_feats)
+                this->cell.push_back(-1);
+                continue;
+            }
+            const int32_t c = this->cell_at(std::atan2(y, x) * RAD2DEG,
+                                            std::atan2(z, xy) * RAD2DEG);
+            this->cell.push_back(c);
+            if (rng <= this->nearest[static_cast<size_t>(c)])
+            {
+                this->nearest[static_cast<size_t>(c)] = rng;
+                this->range_mm[static_cast<size_t>(c)] = static_cast<uint16_t>(
+                    std::clamp(std::nearbyint(rng * 1000.), 0., 65535.));
+                if (this->m.use_intensity)
                 {
-                    std::copy(x.begin(), x.end(),
-                              this->feats.begin() + static_cast<long>(c) * F);
+                    float f;
+                    std::memcpy(&f, pi, sizeof(f));
+                    double v = f;
+                    if (this->m.intensity_max != 65535.)
+                    {
+                        v = std::nearbyint(v * (65535. / this->m.intensity_max));
+                    }
+                    this->inten[static_cast<size_t>(c)] =
+                        static_cast<uint16_t>(std::clamp(v, 0., 65535.));
                 }
             }
         }
+    }
 
-        // 5. Back to points
+    /** Grid cell (ring * cols + col) of a direction in the lidar's frame:
+      * the nearest layer by elevation, the column by azimuth. */
+    int32_t cell_at(double azimuth_deg, double elevation_deg) const
+    {
+        const int R = this->m.rings, C = this->m.cols;
+        int k = 0;
+        double best = std::abs(elevation_deg - this->m.layer_elev_deg[0]);
+        for (int j = 1; j < R; j++)
+        {
+            const double d = std::abs(elevation_deg - this->m.layer_elev_deg[j]);
+            if (d < best) { best = d; k = j; }
+        }
+        // nearbyint: round half to even, as numpy does
+        const long idx = static_cast<long>(
+            std::nearbyint((azimuth_deg - this->m.layer_az0_deg[k]) / this->m.col_deg));
+        const int col = static_cast<int>(mod(idx + this->m.col0[k], C));
+        const int ring = (R - 1) - k;
+        return ring * C + col;
+    }
+
+    /** No more returns will be added for cell c (see above). */
+    void cover(int32_t c)
+    {
+        if (c < 0 || static_cast<size_t>(c) >= this->n_cells ||
+            this->covered[static_cast<size_t>(c)])
+        {
+            return;
+        }
+        this->covered[static_cast<size_t>(c)] = 1;
+        this->finalize(static_cast<size_t>(c));
+        const int C = this->m.cols;
+        const int ring = c / C, col = c % C;
+        for (int r = std::max(ring - this->nb_rings, 0);
+             r <= std::min(ring + this->nb_rings, this->m.rings - 1); r++)
+        {
+            for (int dc = -this->nb_cols; dc <= this->nb_cols; dc++)
+            {
+                const size_t n = static_cast<size_t>(r) * static_cast<size_t>(C) +
+                    static_cast<size_t>(mod(col + dc, C));
+                if (--this->missing[n] == 0 && !std::isnan(this->current.logr[n]))
+                {
+                    this->ready.push_back(static_cast<int32_t>(n));
+                }
+            }
+        }
+    }
+
+    /** Classifies the cells whose inputs are complete. Returns how many. */
+    size_t classify_ready()
+    {
+        const size_t n = this->ready.size();
+        this->classify(this->ready);
+        this->ready.clear();
+        return n;
+    }
+
+    /**
+     * Ends the scan: classifies what is left and reports every point added
+     * since begin() (see process()). Returns the number of points with
+     * probability >= threshold (threshold < 0: the model's own).
+     */
+    size_t finish(std::vector<float>& point_prob, double threshold = -1.)
+    {
+        if (threshold < 0.) { threshold = this->m.threshold; }
+
+        // Cells never covered are complete now.
+        this->ready.clear();
+        for (size_t c = 0; c < this->n_cells; c++)
+        {
+            if (!this->covered[c])
+            {
+                this->covered[c] = 1;
+                this->finalize(c);
+            }
+        }
+        for (size_t c = 0; c < this->n_cells; c++)
+        {
+            if (!this->done[c] && !std::isnan(this->current.logr[c]))
+            {
+                this->ready.push_back(static_cast<int32_t>(c));
+            }
+        }
+        this->classify(this->ready);
+        this->ready.clear();
+
+        // Back to points
+        const size_t n_points = this->cell.size();
         point_prob.assign(n_points, -1.f);
         size_t flagged = 0;
         for (size_t i = 0; i < n_points; i++)
@@ -499,14 +591,14 @@ public:
             const int32_t c = this->cell[i];
             if (c < 0) { continue; }
             const double rng = this->range_pt[i];
-            if (rng >= this->m.min_range_m && rng <= this->nearest[c])
+            if (rng >= this->m.min_range_m && rng <= this->nearest[static_cast<size_t>(c)])
             {
                 point_prob[i] = this->cell_prob[static_cast<size_t>(c)];
                 flagged += (point_prob[i] >= threshold);
             }
         }
 
-        // 6. This scan becomes history
+        // This scan becomes history
         if (this->depth > 0)
         {
             std::rotate(this->history.rbegin(), this->history.rbegin() + 1, this->history.rend());
@@ -543,6 +635,59 @@ private:
     static constexpr double RAD2DEG = 180. / 3.14159265358979323846;
 
     static long mod(long a, long n) { return ((a % n) + n) % n; }
+
+    /** A cell's returns are all in: its log range (NaN = nothing to
+      * classify there) and whether it changed against the scan before. */
+    void finalize(size_t c)
+    {
+        const float nan = std::numeric_limits<float>::quiet_NaN();
+        if (this->range_mm[c] < this->min_range_mm) { return; }    // stays NaN
+        this->rng_m[c] = static_cast<float>(this->range_mm[c]) / 1000.f;
+        // In double, then rounded: a float log differs in the last bit
+        // between libraries, and that bit can flip a tree's decision
+        // (the Python does the same, see artifact_features._log).
+        const float lr = static_cast<float>(std::log(static_cast<double>(this->rng_m[c])));
+        this->current.logr[c] = lr;
+        for (size_t t = 0; t < this->m.time_offsets.size(); t++)
+        {
+            if (this->m.time_offsets[t] != -1) { continue; }
+            // Present in both with another range, or present now and
+            // absent then.
+            const float then = this->prev[t] ? (*this->prev[t])[c] : nan;
+            if (std::isnan(then)) { this->gone[t][c] = 1; }
+            else if (std::abs(then - lr) > this->m.close_log) { this->unstable[t][c] = 1; }
+        }
+    }
+
+    /** Features and trees for the given cells. With OpenMP the cells are
+      * shared out in small chunks: with early exit their cost varies a lot. */
+    void classify(const std::vector<int32_t>& cells)
+    {
+        const int C = this->m.cols;
+        const int F = this->m.n_features;
+        const long n = static_cast<long>(cells.size());
+#ifdef _OPENMP
+        #pragma omp parallel if (n > 64)
+#endif
+        {
+            std::vector<float> x(static_cast<size_t>(F));
+#ifdef _OPENMP
+            #pragma omp for schedule(dynamic, 8)
+#endif
+            for (long i = 0; i < n; i++)
+            {
+                const int32_t c = cells[static_cast<size_t>(i)];
+                this->features(c / C, c % C, x.data());
+                this->cell_prob[static_cast<size_t>(c)] = this->m.predict(x.data(), this->early);
+                this->done[static_cast<size_t>(c)] = 1;
+                if (this->keep_feats)
+                {
+                    std::copy(x.begin(), x.end(),
+                              this->feats.begin() + static_cast<long>(c) * F);
+                }
+            }
+        }
+    }
 
     /** log range of a cell; NaN beyond the top/bottom ring, wraps in azimuth */
     float at(const std::vector<float>& g, int ring, int col) const
@@ -697,6 +842,7 @@ private:
     size_t n_cells;
     int depth = 0;
     int min_range_mm = 200;
+    int nb_rings = 2, nb_cols = 4;      // neighbourhood half-size
 
     Scan current;
     std::vector<Scan> history;                       // [0] = one scan back
@@ -709,8 +855,11 @@ private:
     std::vector<uint16_t> range_mm;     // per cell
     std::vector<uint16_t> inten;        // per cell
     std::vector<float> rng_m;           // per cell
-    std::vector<int32_t> cand;
     std::vector<float> cell_prob;
+    std::vector<uint8_t> covered;       // per cell: all its returns are in
+    std::vector<uint8_t> done;          // per cell: classified
+    std::vector<int> missing;           // per cell: uncovered cells its inputs look at
+    std::vector<int32_t> ready;
     bool keep_feats = false;
     bool early = false;
     std::vector<float> feats;

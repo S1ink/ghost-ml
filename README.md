@@ -118,6 +118,16 @@ filter.process(xyz, n_points, intensity_or_null, stamp_ns, point_prob);
 // point_prob[i] >= filter.model().threshold  ->  point i is an artifact
 ```
 
+A lidar that sends each scan in pieces (the multiScan sends 12 UDP segments
+per revolution) can feed them as they arrive: `begin`, then per piece `add`,
+`cover` for every beam it carried and `classify_ready`, then `finish`. A
+cell is classified as soon as every cell its inputs look at is complete, so
+only the cells next to the last piece are left when the scan ends. The
+result is identical to `process` (which is built on these calls). On the
+multiScan about 21 % of the cells wait for the last segment: rings 0 to 6
+and 7 to 13 are sent half a revolution apart and the middle rings look at
+both. See `Filter::begin` in the header.
+
 The header repeats the Python feature code, so the two must stay in step.
 To check that they do, on your own data:
 
